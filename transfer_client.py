@@ -8,7 +8,7 @@ class Client:
         self.conn=None; self.transport=None; self.kind=None
     def connect(self, host, port, username, password, protocol):
         self.close()
-        if protocol not in ('FTP', 'FTPS', 'SFTP'):
+        if protocol not in ('FTP', 'FTPS', 'FTPES', 'SFTP'):
             raise ValueError('Unsupported protocol')
         if protocol=='SFTP':
             try: import paramiko
@@ -21,11 +21,14 @@ class Client:
             except Exception:
                 ssh.close(); raise
         else:
-            cls=ftplib.FTP_TLS if protocol=='FTPS' else ftplib.FTP
-            c=cls(context=ssl.create_default_context()) if protocol=='FTPS' else cls()
+            tls = protocol in ('FTPS', 'FTPES')
+            cls=ftplib.FTP_TLS if tls else ftplib.FTP
+            c=cls(context=ssl.create_default_context()) if tls else cls()
             try:
-                c.connect(host,port,timeout=20); c.login(username,password)
-                if protocol=='FTPS': c.prot_p()
+                c.connect(host,port,timeout=20)
+                if tls: c.auth()
+                c.login(username,password)
+                if tls: c.prot_p()
                 c.voidcmd('TYPE I')
             except Exception:
                 c.close(); raise

@@ -84,7 +84,7 @@ def validate_profiles(profiles):
         if name in names:
             raise ValueError('Duplicate profile name')
         names.add(name)
-        if profile['protocol'] not in ('FTP', 'FTPS', 'SFTP'):
+        if profile['protocol'] not in ('FTP', 'FTPS', 'FTPES', 'SFTP'):
             raise ValueError('Invalid protocol')
         if type(profile.get('port')) is not int or not 1 <= profile['port'] <= 65535:
             raise ValueError('Port must be 1–65535')

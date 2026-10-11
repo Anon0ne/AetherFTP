@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3 — 2026-10-11
+
+- Add an explicit FTPES protocol option and retain FTPS as an explicit-TLS alias.
+- Negotiate AUTH TLS before login and protect FTP data connections with PROT P.
+- Accept connection URLs in the host field with custom ports, users and remote paths.
+- Open a file URL’s parent directory and select the named file after connection.
+- Reject URL-embedded passwords and control characters; validate FTPES profiles.
+
+
 ## 0.4.2 — 2026-10-11
 
 - Add purple/cyan inline queue progress bars with centered percentage and live MB/s.

@@ -21,6 +21,7 @@ from server_book import (load_profiles, save_profiles, encrypt_password,
 from transfer_client import Client
 from version import __version__
 from transfer_stats import TransferStats
+from connection_url import parse_connection_url
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -89,21 +90,25 @@ class Session(QWidget):
         self.connected = False
         self.local_path = Path.home()
         self.remote_path = '/'
+        self.url_filename = ''
         self.worker = threading.Thread(target=self.run_jobs, daemon=True)
         self.worker.start()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0); layout.setSpacing(8)
         connection = QWidget(); connection.setObjectName('connectionBar')
         form = QHBoxLayout(connection); form.setContentsMargins(10, 8, 10, 8); form.setSpacing(8)
-        self.protocol = QComboBox(); self.protocol.addItems(['SFTP', 'FTPS', 'FTP'])
+        self.protocol = QComboBox(); self.protocol.addItems(['SFTP', 'FTPES', 'FTPS', 'FTP'])
+        self.protocol.setToolTip('FTPES and legacy FTPS use explicit TLS (AUTH TLS), not implicit TLS.')
         self.host = QLineEdit(); self.port = QLineEdit('22')
+        self.host.setPlaceholderText('Host or ftpes:// URL')
+        self.host.editingFinished.connect(self.load_connection_url)
         self.user = QLineEdit(); self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.EchoMode.Password)
         for name, widget, stretch in [('Protocol', self.protocol, 0), ('Host / IP', self.host, 2), ('Port', self.port, 0), ('Username', self.user, 1), ('Password', self.password, 1)]:
             field = QVBoxLayout(); field.setSpacing(3)
             label = QLabel(name); label.setObjectName('muted'); label.setBuddy(widget)
             widget.setAccessibleName(name)
             field.addWidget(label); field.addWidget(widget); form.addLayout(field, stretch)
-        self.protocol.setFixedWidth(82); self.port.setFixedWidth(58)
+        self.protocol.setFixedWidth(90); self.port.setFixedWidth(58)
         self.host.setMinimumWidth(120); self.user.setMinimumWidth(85); self.password.setMinimumWidth(85)
         self.protocol.currentTextChanged.connect(lambda value: self.port.setText('22' if value == 'SFTP' else '21'))
         for name, action in [('Server Book', self.server_book), ('Connect', self.connect_server), ('Disconnect', self.disconnect)]:
@@ -212,7 +217,25 @@ class Session(QWidget):
         else:
             if state == 'Running': self.transfers.scrollToItem(self.transfers.topLevelItem(row))
             bar.setFormat('0%  •  0.00 MB/s  •  ' + state)
+    def load_connection_url(self):
+        if '://' not in self.host.text(): return True
+        if self.pending or self.connected:
+            self.status.setText('Disconnect and finish queued work before loading a URL'); return False
+        try:
+            values = parse_connection_url(self.host.text())
+        except ValueError:
+            self.status.setText('Invalid connection URL. Use a host, optional user/port and path; enter passwords separately.')
+            return False
+        self.protocol.setCurrentText(values['protocol'])
+        self.host.setText(values['host']); self.port.setText(str(values['port']))
+        self.user.setText(values['username']); self.password.clear()
+        self.remote_path = values['remote_path']; self.remote_display.setText(self.remote_path)
+        self.url_filename = values['filename']
+        self.status.setText('URL loaded — enter your password, then Connect')
+        return True
+
     def connect_server(self):
+        if not self.load_connection_url(): return
         if self.pending:
             self.status.setText('Wait for queued operations before reconnecting'); return
         try:
@@ -253,6 +276,10 @@ class Session(QWidget):
             rows = [('..', True, 0, posixpath.dirname(path.rstrip('/')) or '/')]
             rows += [(n, d, s, posixpath.join(path, n)) for n, d, s in entries]
             self.fill(self.remote_tree, rows)
+            if self.url_filename:
+                for item in self.remote_tree.findItems(self.url_filename, Qt.MatchFlag.MatchExactly, 0):
+                    item.setSelected(True); self.remote_tree.scrollToItem(item)
+                self.url_filename = ''
         self.submit(lambda: self.client.listdir(path), done)
     def navigate(self, side):
         if side == 'local': self.local_path = Path(self.local_display.text()).expanduser(); self.refresh_local()
@@ -355,7 +382,7 @@ class ServerBook(QDialog):
         defaults = {'name': '', 'host': self.session.host.text(), 'port': self.session.port.text(), 'username': self.session.user.text(), 'local_path': str(self.session.local_path), 'remote_path': self.session.remote_path}
         for key in defaults:
             field = QLineEdit(str(old.get(key, defaults[key]))); layout.addRow(key.replace('_', ' ').title(), field); fields[key] = field
-        protocol = QComboBox(); protocol.addItems(['SFTP', 'FTPS', 'FTP']); protocol.setCurrentText(old.get('protocol', self.session.protocol.currentText())); layout.addRow('Protocol', protocol)
+        protocol = QComboBox(); protocol.addItems(['SFTP', 'FTPES', 'FTPS', 'FTP']); protocol.setCurrentText(old.get('protocol', self.session.protocol.currentText())); layout.addRow('Protocol', protocol)
         password = QLineEdit(); password.setEchoMode(QLineEdit.EchoMode.Password); layout.addRow('Password (blank keeps saved)', password)
         mode = QComboBox(); mode.addItems(['Do not save', 'Windows Credential Manager', 'Encrypted profile (DPAPI)'])
         mode.setCurrentIndex(1 if old.get('credential') else 2 if old.get('password_dpapi') else 0); layout.addRow('Password storage', mode)

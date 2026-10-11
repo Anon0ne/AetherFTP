@@ -209,3 +209,71 @@ def test_transfer_bars_and_timing_events(failure, monkeypatch):
         release.set(); session.worker.join(.1)
         session.timer.stop(); session.jobs.put(None); session.worker.join(3)
         logger.removeHandler(handler)
+
+
+def test_ftpes_url_custom_port_and_file():
+    from connection_url import parse_connection_url
+    result = parse_connection_url('ftpes://sampleuser@example.invalid:2990/files/sample.txt')
+    assert result == dict(protocol='FTPES', host='example.invalid', port=2990, username='sampleuser', remote_path='/files', filename='sample.txt')
+
+
+@pytest.mark.parametrize('url', ['ftpes://user:secret@example.invalid/', 'ftpes://example.invalid:0/', 'ftpes://example.invalid:65536/', 'https://example.invalid/', 'ftpes://example.invalid/%0d%0aDELE', 'ftpes://example.invalid/?token=secret'])
+def test_reject_unsafe_connection_urls(url):
+    from connection_url import parse_connection_url
+    with pytest.raises(ValueError): parse_connection_url(url)
+
+
+def test_ftpes_url_defaults_and_ipv6():
+    from connection_url import parse_connection_url
+    result = parse_connection_url('ftpes://sample%20user@[::1]/files/')
+    assert result['host'] == '::1' and result['port'] == 21
+    assert result['username'] == 'sample user' and result['remote_path'] == '/files/'
+    assert result['filename'] == ''
+
+
+def test_ftpes_authenticates_tls_before_login(monkeypatch):
+    import transfer_client
+    ftp = Mock(); factory = Mock(return_value=ftp)
+    monkeypatch.setattr(transfer_client.ftplib, 'FTP_TLS', factory)
+    client = Client(); client.connect('example.invalid',2990,'sampleuser','secret','FTPES')
+    assert [c[0] for c in ftp.mock_calls] == ['connect','auth','login','prot_p','voidcmd']
+    ftp.connect.assert_called_once_with('example.invalid',2990,timeout=20)
+    assert factory.call_args.kwargs['context'].check_hostname
+    assert client.kind == 'FTPES'
+    p = profile(); p['protocol'] = 'FTPES'; assert book.validate_profiles([p]) == [p]
+
+
+def test_ftpes_tls_failure_never_sends_credentials(monkeypatch):
+    import ssl
+    import transfer_client
+    ftp = Mock(); ftp.auth.side_effect = ssl.SSLCertVerificationError('untrusted certificate')
+    monkeypatch.setattr(transfer_client.ftplib, 'FTP_TLS', Mock(return_value=ftp))
+    with pytest.raises(ssl.SSLCertVerificationError): Client().connect('example.invalid',2990,'sampleuser','secret','FTPES')
+    ftp.login.assert_not_called(); ftp.close.assert_called_once()
+
+
+def test_gui_connection_url_load_and_file_selection(monkeypatch):
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from PySide6.QtWidgets import QApplication
+    from aetherftp import Session
+    import time
+    app = QApplication.instance() or QApplication([])
+    session = Session(logging.getLogger('url-test'))
+    try:
+        session.password.setText('old-secret')
+        session.host.setText('ftpes://sampleuser@example.invalid:2990/files/sample.txt')
+        assert session.load_connection_url()
+        assert session.protocol.currentText() == 'FTPES'
+        assert session.port.text() == '2990' and session.remote_display.text() == '/files'
+        assert session.password.text() == ''
+        session.password.setText('new-secret')
+        connect = Mock(); monkeypatch.setattr(session.client,'connect',connect)
+        monkeypatch.setattr(session.client,'listdir',Mock(return_value=[('sample.txt',False,100)]))
+        session.connect_server()
+        deadline = time.monotonic() + 3
+        while session.pending and time.monotonic() < deadline:
+            session.pump(); app.processEvents(); time.sleep(.01)
+        connect.assert_called_once_with('example.invalid',2990,'sampleuser','new-secret','FTPES')
+        assert session.remote_tree.selectedItems()[0].text(0) == 'sample.txt'
+    finally:
+        session.timer.stop(); session.jobs.put(None); session.worker.join(3)

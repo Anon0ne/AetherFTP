@@ -1,4 +1,4 @@
-# AetherFTP 0.4.2
+# AetherFTP 0.4.3
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -41,3 +41,9 @@ Protocol behavior is covered by isolated adapter tests. Real-server interoperabi
 Queue rows show a purple/cyan bar with centered percentage and live transfer rate in decimal MB/s (1 MB = 1,000,000 bytes). The queue opens when transfers are added; it can still be collapsed. Completed rows show the average transfer rate. Unknown total sizes display a dash instead of a percentage until completion. Resume rates count only newly transferred bytes.
 
 The Event log tab shows each file’s start/completion/failure time, elapsed seconds, transferred bytes and average MB/s. Persistent JSON logs record UTC timestamps and transfer IDs without filenames, paths, hosts or credentials. The row tooltip contains the matching transfer ID. Timing excludes waiting in the queue and includes protocol setup for that transfer. Failed transfers retain their partial progress and timing record.
+
+## FTPES connection URLs
+
+FTPES uses explicit TLS: AUTH TLS before login and PROT P for encrypted data transfers. The legacy FTPS option uses the same explicit-TLS behavior; implicit FTPS is not supported. Certificate and hostname verification remain enabled.
+
+Paste a URL such as `ftpes://sampleuser@example.invalid:2990/files/sample.txt` into Host / IP and leave the field. AetherFTP fills the protocol, host, username and port, clears the previous password, and sets the remote directory to `/files`. Enter the password separately and click Connect. The named file is selected in the remote pane; use Download to transfer it. Directory URLs should end with `/`. No connection URL is automatically saved to the Server Book.
