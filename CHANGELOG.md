@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2 — 2026-10-11
+
+- Add purple/cyan inline queue progress bars with centered percentage and live MB/s.
+- Show the queue when transfers are added and scroll to the running transfer.
+- Log timestamped start, completion and failure events, duration, byte count and average MB/s.
+- Exclude existing resumed bytes from transfer-rate measurements.
+
+
 ## 0.4.1 — 2026-10-11
 
 - Restore compact connection toolbar and original-style purple/cyan file panels.

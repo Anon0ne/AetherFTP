@@ -9,16 +9,18 @@ import queue
 import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTabWidget,
     QSplitter, QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
-    QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView)
+    QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView, QProgressBar)
 from server_book import (load_profiles, save_profiles, encrypt_password,
     profile_password, windows_vault, STORE)
 from transfer_client import Client
 from version import __version__
+from transfer_stats import TransferStats
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -39,6 +41,8 @@ QLabel#brand { color: #a78bfa; font-size: 20pt; font-weight: 600; }
 QLabel#muted { color: #9caac1; }
 QLabel#localHeading { color: #38bdf8; font-weight: 600; }
 QLabel#remoteHeading { color: #a78bfa; font-weight: 600; }
+QProgressBar { background: #0b101b; color: #ffffff; border: 1px solid #58677e; border-radius: 4px; text-align: center; font-weight: 600; }
+QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #594184, stop:1 #146a7c); border-radius: 3px; }
 '''
 
 
@@ -81,6 +85,7 @@ class Session(QWidget):
         self.jobs = queue.Queue()
         self.events = queue.Queue()
         self.pending = 0
+        self.progress_bars = {}
         self.connected = False
         self.local_path = Path.home()
         self.remote_path = '/'
@@ -171,15 +176,42 @@ class Session(QWidget):
         while not self.events.empty():
             event = self.events.get_nowait()
             if event[0] == 'done': self.pending -= 1
-            elif event[0] == 'state': self.transfers.topLevelItem(event[1]).setText(1, event[2])
+            elif event[0] == 'state': self.set_transfer_state(event[1], event[2])
+            elif event[0] == 'progress':
+                bar = self.progress_bars[event[1]]
+                percent, rate = event[2], event[3]
+                bar.setValue(percent or 0)
+                bar.setFormat(f'{percent if percent is not None else "—"}%  •  {rate:.2f} MB/s')
+            elif event[0] == 'transfer_event':
+                data = event[1]
+                self.logger.info(json.dumps(data))
+                stamp = datetime.fromisoformat(data['timestamp']).astimezone().strftime('%H:%M:%S')
+                label = self.transfers.topLevelItem(event[2]).text(0)
+                details = f"{stamp}  {label}  [{data['transfer_id'][:8]}]  {data['event'].removeprefix('transfer_')}"
+                if 'duration_seconds' in data:
+                    details += f"  | {data['duration_seconds']:.3f} s | {data['average_mbps']:.2f} MB/s | {data['bytes_transferred']} bytes"
+                self.log.appendPlainText(details)
             elif event[0] == 'success':
-                if event[3] is not None: self.transfers.topLevelItem(event[3]).setText(1, 'Completed')
+                if event[3] is not None: self.set_transfer_state(event[3], 'Completed')
                 if event[1]: event[1](event[2])
             elif event[0] == 'error':
                 self.status.setText('ERROR: ' + event[1] + ' — verify connection, paths and permissions')
                 self.log.appendPlainText(self.status.text())
                 self.logger.error(json.dumps({'event': 'operation_failed', 'error_type': event[1]}))
-                if event[2] is not None: self.transfers.topLevelItem(event[2]).setText(1, 'Failed — requeue to retry')
+                if event[2] is not None: self.set_transfer_state(event[2], 'Failed')
+    def set_transfer_state(self, row, state):
+        bar = self.progress_bars.get(row)
+        if bar is None:
+            self.transfers.topLevelItem(row).setText(1, state)
+            return
+        if state == 'Completed':
+            bar.setValue(100)
+            bar.setFormat('100%  •  ' + bar.property('average_text') + '  •  Completed')
+        elif state == 'Failed':
+            bar.setFormat(f'{bar.value()}%  •  Failed — requeue to retry')
+        else:
+            if state == 'Running': self.transfers.scrollToItem(self.transfers.topLevelItem(row))
+            bar.setFormat('0%  •  0.00 MB/s  •  ' + state)
     def connect_server(self):
         if self.pending:
             self.status.setText('Wait for queued operations before reconnecting'); return
@@ -234,13 +266,42 @@ class Session(QWidget):
         resume = self.resume.isChecked()
         row = self.transfers.topLevelItemCount()
         self.transfers.addTopLevelItem(QTreeWidgetItem([direction + ': ' + Path(source).name, 'Queued']))
+        bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(0); bar.setMinimumHeight(28)
+        bar.setAlignment(Qt.AlignmentFlag.AlignCenter); bar.setFormat('0%  •  0.00 MB/s  •  Queued')
+        bar.setProperty('average_text', '0.00 MB/s')
+        self.transfers.setItemWidget(self.transfers.topLevelItem(row), 1, bar)
+        self.progress_bars[row] = bar
+        self.activity_toggle.setChecked(True); self.activity.setCurrentIndex(0)
+        transfer_id = str(uuid.uuid4())
+        self.transfers.topLevelItem(row).setToolTip(0, 'Transfer ID: ' + transfer_id)
+        def record(event, **fields):
+            self.events.put(('transfer_event', {'event': event, 'transfer_id': transfer_id,
+                'direction': direction, 'timestamp': datetime.now(timezone.utc).isoformat(), **fields}, row))
+        stats = None
+        last_emit = [0.0]
         def progress(done, total):
-            self.events.put(('state', row, f'{done * 100 // total}%' if total else f'{done} bytes'))
+            percent, rate = stats.update(done, total)
+            now = stats.clock()
+            if now - last_emit[0] >= 0.1 or done == total:
+                self.events.put(('progress', row, percent, rate)); last_emit[0] = now
         method = self.client.upload if direction == 'Upload' else self.client.download
-        def completed(_):
+        def transfer():
+            nonlocal stats
+            stats = TransferStats()
+            record('transfer_started')
+            try:
+                method(str(source), str(dest), progress, resume=resume)
+            except Exception as exc:
+                record('transfer_failed', error_type=type(exc).__name__, **stats.summary())
+                raise
+            summary = stats.summary()
+            record('transfer_completed', **summary)
+            return summary
+        def completed(summary):
+            bar.setProperty('average_text', f'{summary["average_mbps"]:.2f} MB/s')
+            self.set_transfer_state(row, 'Completed')
             self.refresh_local() if direction == 'Download' else self.refresh_remote()
-            self.logger.info(json.dumps({'event': 'transfer_completed', 'direction': direction}))
-        self.submit(lambda: method(str(source), str(dest), progress, resume=resume), completed, row)
+        self.submit(transfer, completed, row)
     def upload_paths(self, paths):
         for path in paths:
             if path.is_file():

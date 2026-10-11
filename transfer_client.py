@@ -61,6 +61,7 @@ class Client:
             if resume: raise ValueError('Server did not provide a resume size')
             total = 0
         if resume and offset > total: raise ValueError('Local file exceeds remote size')
+        callback(offset, total)
         if self.kind=='SFTP':
             with self.conn.open(remote, 'rb') as src, open(local, 'ab' if resume else 'wb') as dst:
                 src.seek(offset)
@@ -79,6 +80,7 @@ class Client:
             offset = self.conn.stat(remote).st_size if self.kind=='SFTP' else self.conn.size(remote)
         total = os.path.getsize(local)
         if offset > total: raise ValueError('Remote file exceeds local size')
+        callback(offset, total)
         if self.kind=='SFTP':
             with open(local, 'rb') as src, self.conn.open(remote, 'r+b' if resume else 'wb') as dst:
                 src.seek(offset); dst.seek(offset)

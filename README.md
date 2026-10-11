@@ -1,4 +1,4 @@
-# AetherFTP 0.4.1
+# AetherFTP 0.4.2
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -35,3 +35,9 @@ Never commit profiles, passwords, tokens, private keys or generated builds. Use 
 ## Validation limits
 
 Protocol behavior is covered by isolated adapter tests. Real-server interoperability, disconnect recovery, and visual checks at enlarged system fonts require additional testing before a public release. See `CHANGELOG.md` for version history.
+
+## Transfer progress and timing
+
+Queue rows show a purple/cyan bar with centered percentage and live transfer rate in decimal MB/s (1 MB = 1,000,000 bytes). The queue opens when transfers are added; it can still be collapsed. Completed rows show the average transfer rate. Unknown total sizes display a dash instead of a percentage until completion. Resume rates count only newly transferred bytes.
+
+The Event log tab shows each file’s start/completion/failure time, elapsed seconds, transferred bytes and average MB/s. Persistent JSON logs record UTC timestamps and transfer IDs without filenames, paths, hosts or credentials. The row tooltip contains the matching transfer ID. Timing excludes waiting in the queue and includes protocol setup for that transfer. Failed transfers retain their partial progress and timing record.
