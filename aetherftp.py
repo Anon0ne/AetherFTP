@@ -22,6 +22,7 @@ from transfer_client import Client
 from version import __version__
 from transfer_stats import TransferStats
 from connection_url import parse_connection_url
+from diagnostics import redact_message
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -85,6 +86,8 @@ class Session(QWidget):
         self.client = Client()
         self.jobs = queue.Queue()
         self.events = queue.Queue()
+        self.client.on_status = lambda message: self.events.put(('connection_step', message, datetime.now(timezone.utc).isoformat()))
+        self.connection_secrets = ()
         self.pending = 0
         self.progress_bars = {}
         self.connected = False
@@ -160,27 +163,38 @@ class Session(QWidget):
         self.activity.setVisible(visible)
         self.activity_toggle.setText(('▾' if visible else '▸') + ' Transfer activity')
 
-    def submit(self, action, success=None, row=None):
+    def submit(self, action, success=None, row=None, operation='Operation'):
         self.pending += 1
-        self.jobs.put((action, success, row))
+        self.jobs.put((action, success, row, operation))
     def run_jobs(self):
         while True:
             job = self.jobs.get()
             if job is None:
                 self.client.close(); return
-            action, success, row = job
+            action, success, row, operation = job
             try:
+                if operation != 'Operation': self.events.put(('operation_status', operation, 'Started'))
                 if row is not None: self.events.put(('state', row, 'Running'))
                 result = action()
                 self.events.put(('success', success, result, row))
+                if operation != 'Operation': self.events.put(('operation_status', operation, 'Completed'))
             except Exception as exc:
-                # Log types only: protocol exceptions can contain private server responses.
-                self.events.put(('error', type(exc).__name__, row))
+                # Real replies are useful, but authentication values must never enter logs.
+                message = redact_message(str(exc), self.connection_secrets)
+                stage = self.client.connection_stage if operation == 'Connect' else operation
+                self.events.put(('error', type(exc).__name__, row, stage, message))
             finally: self.events.put(('done',))
     def pump(self):
         while not self.events.empty():
             event = self.events.get_nowait()
             if event[0] == 'done': self.pending -= 1
+            elif event[0] == 'connection_step':
+                self.log.appendPlainText(event[2] + '  ' + event[1])
+                self.logger.info(json.dumps({'event': 'connection_step', 'timestamp': event[2], 'stage': event[1]}))
+            elif event[0] == 'operation_status':
+                stamp = datetime.now(timezone.utc).isoformat()
+                self.log.appendPlainText(stamp + '  ' + event[1] + ': ' + event[2])
+                self.logger.info(json.dumps({'event': 'operation_status', 'timestamp': stamp, 'operation': event[1], 'status': event[2]}))
             elif event[0] == 'state': self.set_transfer_state(event[1], event[2])
             elif event[0] == 'progress':
                 bar = self.progress_bars[event[1]]
@@ -200,9 +214,12 @@ class Session(QWidget):
                 if event[3] is not None: self.set_transfer_state(event[3], 'Completed')
                 if event[1]: event[1](event[2])
             elif event[0] == 'error':
-                self.status.setText('ERROR: ' + event[1] + ' — verify connection, paths and permissions')
-                self.log.appendPlainText(self.status.text())
-                self.logger.error(json.dumps({'event': 'operation_failed', 'error_type': event[1]}))
+                self.status.setText('ERROR: ' + event[3] + ' — ' + event[1] + ' (see Event log)')
+                stamp = datetime.now(timezone.utc).isoformat()
+                self.log.appendPlainText(stamp + '  ' + self.status.text() + '\n' + event[4])
+                self.logger.error(json.dumps({'event': 'operation_failed', 'timestamp': stamp,
+                    'error_type': event[1], 'stage': event[3], 'message': event[4]}))
+                self.activity_toggle.setChecked(True); self.activity.setCurrentIndex(1)
                 if event[2] is not None: self.set_transfer_state(event[2], 'Failed')
     def set_transfer_state(self, row, state):
         bar = self.progress_bars.get(row)
@@ -244,16 +261,17 @@ class Session(QWidget):
         except ValueError:
             self.status.setText('Enter a host and port between 1 and 65535'); return
         args = (self.host.text().strip(), port, self.user.text(), self.password.text(), self.protocol.currentText())
+        self.connection_secrets = tuple(value for value in args[:1] + args[2:4] if value)
         self.connected = False
         self.status.setText('CONNECTING…')
-        self.submit(lambda: self.client.connect(*args), self.on_connected)
+        self.submit(lambda: self.client.connect(*args), self.on_connected, operation='Connect')
     def on_connected(self, _):
         self.connected = True; self.status.setText('CONNECTED'); self.refresh_remote()
         self.logger.info(json.dumps({'event': 'connected', 'protocol': self.protocol.currentText()}))
     def disconnect(self):
         if self.pending: self.status.setText('Wait for queued operations before disconnecting'); return
         self.connected = False
-        self.submit(self.client.close, lambda _: self.status.setText('OFFLINE'))
+        self.submit(self.client.close, lambda _: self.status.setText('OFFLINE'), operation='Disconnect')
     def refresh_local(self):
         try:
             entries = [('..', True, 0, str(self.local_path.parent))]
@@ -280,7 +298,7 @@ class Session(QWidget):
                 for item in self.remote_tree.findItems(self.url_filename, Qt.MatchFlag.MatchExactly, 0):
                     item.setSelected(True); self.remote_tree.scrollToItem(item)
                 self.url_filename = ''
-        self.submit(lambda: self.client.listdir(path), done)
+        self.submit(lambda: self.client.listdir(path), done, operation='Directory listing')
     def navigate(self, side):
         if side == 'local': self.local_path = Path(self.local_display.text()).expanduser(); self.refresh_local()
         else: self.refresh_remote()
@@ -328,7 +346,7 @@ class Session(QWidget):
             bar.setProperty('average_text', f'{summary["average_mbps"]:.2f} MB/s')
             self.set_transfer_state(row, 'Completed')
             self.refresh_local() if direction == 'Download' else self.refresh_remote()
-        self.submit(transfer, completed, row)
+        self.submit(transfer, completed, row, operation=direction)
     def upload_paths(self, paths):
         for path in paths:
             if path.is_file():

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4 — 2026-10-11
+
+- Reuse the authenticated TLS control session for protected FTPES/FTPS data connections.
+- Close a data socket if its TLS handshake fails.
+- Log connection steps, negotiated TLS version, operation statuses, and data handshake steps.
+- Display server error replies and SSL details with known credentials redacted; open Event log on failure.
+
+
 ## 0.4.3 — 2026-10-11
 
 - Add an explicit FTPES protocol option and retain FTPS as an explicit-TLS alias.

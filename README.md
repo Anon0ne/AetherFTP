@@ -1,4 +1,4 @@
-# AetherFTP 0.4.3
+# AetherFTP 0.4.4
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -28,7 +28,7 @@ Use SFTP or FTPS whenever possible. FTPS validates certificates using system tru
 
 Profiles are stored in `%APPDATA%\AetherFTP\servers.json`. Choose no password storage, Windows Credential Manager (generic credentials under `AetherFTP/<profile-id>`), or encrypted DPAPI storage. DPAPI credentials belong to the current Windows user. Existing v0.3 profiles remain readable. Blank password fields retain an existing saved password when editing; choosing **Do not save** removes it.
 
-Rotating JSON logs live in `%APPDATA%\AetherFTP\logs`. Logs record event and exception types without raw server responses, credentials or server addresses. GUI error messages intentionally show exception types; verify connection settings and permissions when troubleshooting.
+Rotating JSON logs live in `%APPDATA%\AetherFTP\logs`. Logs record connection steps, operation statuses, transfer timings and redacted server error replies. Known connection hostnames, usernames and passwords are redacted from exception messages. Review logs before sharing; unexpected server replies can contain other private information. GUI error messages intentionally show exception types; verify connection settings and permissions when troubleshooting.
 
 Never commit profiles, passwords, tokens, private keys or generated builds. Use feature branches and run tests before commits. `.github/workflows/windows.yml` validates Windows tests, builds the EXE, verifies packaged startup, and uploads a build artifact. Build artifacts are available from successful Actions runs; create GitHub releases only after the corresponding commit's build is verified. CI does not publish releases automatically.
 
@@ -40,10 +40,16 @@ Protocol behavior is covered by isolated adapter tests. Real-server interoperabi
 
 Queue rows show a purple/cyan bar with centered percentage and live transfer rate in decimal MB/s (1 MB = 1,000,000 bytes). The queue opens when transfers are added; it can still be collapsed. Completed rows show the average transfer rate. Unknown total sizes display a dash instead of a percentage until completion. Resume rates count only newly transferred bytes.
 
-The Event log tab shows each file’s start/completion/failure time, elapsed seconds, transferred bytes and average MB/s. Persistent JSON logs record UTC timestamps and transfer IDs without filenames, paths, hosts or credentials. The row tooltip contains the matching transfer ID. Timing excludes waiting in the queue and includes protocol setup for that transfer. Failed transfers retain their partial progress and timing record.
+The Event log tab shows each file’s start/completion/failure time, elapsed seconds, transferred bytes and average MB/s. Transfer timing records in persistent JSON logs contain UTC timestamps and transfer IDs without filenames, paths, hosts or credentials. Connection diagnostics can include redacted server error replies. The row tooltip contains the matching transfer ID. Timing excludes waiting in the queue and includes protocol setup for that transfer. Failed transfers retain their partial progress and timing record.
 
 ## FTPES connection URLs
 
 FTPES uses explicit TLS: AUTH TLS before login and PROT P for encrypted data transfers. The legacy FTPS option uses the same explicit-TLS behavior; implicit FTPS is not supported. Certificate and hostname verification remain enabled.
 
 Paste a URL such as `ftpes://sampleuser@example.invalid:2990/files/sample.txt` into Host / IP and leave the field. AetherFTP fills the protocol, host, username and port, clears the previous password, and sets the remote directory to `/files`. Enter the password separately and click Connect. The named file is selected in the remote pane; use Download to transfer it. Directory URLs should end with `/`. No connection URL is automatically saved to the Server Book.
+
+## Connection diagnostics
+
+The Event log tab records TCP connection, AUTH TLS and certificate verification, negotiated TLS version, login, PROT P, binary mode, directory-listing status and protected data handshakes. Errors open this tab automatically and include the failing operation plus the server reply or SSL message, with known credentials redacted. FTPES/FTPS data sockets reuse the control connection’s TLS session; certificate checks remain enabled.
+
+Session reuse solves compatibility with servers that require it, but does not bypass certificate problems, authentication failures or blocked passive data ports. Python’s SSLSession API has limitations with TLS 1.3; the negotiated TLS version and exact redacted handshake error help diagnose remaining interoperability problems.

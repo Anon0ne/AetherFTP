@@ -3,9 +3,33 @@ import ftplib
 import os
 import ssl
 
+
+class ReuseFTP_TLS(ftplib.FTP_TLS):
+    """Reuse the authenticated control session for protected data sockets."""
+    def ntransfercmd(self, cmd, rest=None):
+        report = getattr(self, 'on_status', None)
+        if report: report('Opening FTP data connection')
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            try:
+                if report: report('Data TLS handshake: reusing control session')
+                conn = self.context.wrap_socket(conn, server_hostname=self.host,
+                                                session=self.sock.session)
+                if report: report('Protected data connection established')
+            except Exception:
+                conn.close()
+                raise
+        return conn, size
+
+
 class Client:
     def __init__(self):
         self.conn=None; self.transport=None; self.kind=None
+        self.on_status = None
+        self.connection_stage = 'Not connected'
+    def step(self, message):
+        self.connection_stage = message
+        if self.on_status: self.on_status(message)
     def connect(self, host, port, username, password, protocol):
         self.close()
         if protocol not in ('FTP', 'FTPS', 'FTPES', 'SFTP'):
@@ -16,24 +40,39 @@ class Client:
             ssh=paramiko.SSHClient(); ssh.load_system_host_keys(); ssh.load_host_keys(os.path.expanduser('~/.ssh/known_hosts')) if os.path.exists(os.path.expanduser('~/.ssh/known_hosts')) else None
             ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
             try:
+                self.step('SSH connection and authentication')
                 ssh.connect(hostname=host,port=port,username=username,password=password,timeout=20,banner_timeout=20,auth_timeout=20,look_for_keys=False,allow_agent=False)
+                self.step('Opening SFTP subsystem')
                 self.conn=ssh.open_sftp(); self.transport=ssh
             except Exception:
                 ssh.close(); raise
         else:
             tls = protocol in ('FTPS', 'FTPES')
-            cls=ftplib.FTP_TLS if tls else ftplib.FTP
+            cls=ReuseFTP_TLS if tls else ftplib.FTP
             c=cls(context=ssl.create_default_context()) if tls else cls()
+            if tls: c.on_status = self.step
             try:
+                self.step('Connecting TCP socket')
                 c.connect(host,port,timeout=20)
-                if tls: c.auth()
+                self.step('TCP connected; server greeting received')
+                if tls:
+                    self.step('Negotiating AUTH TLS; verifying certificate')
+                    c.auth()
+                    self.step('TLS established: ' + str(c.sock.version()))
+                self.step('Authenticating user')
                 c.login(username,password)
-                if tls: c.prot_p()
+                self.step('Login accepted')
+                if tls:
+                    self.step('Protecting data channel: PBSZ 0 / PROT P')
+                    c.prot_p()
+                    self.step('Data protection enabled; TLS session reuse enabled')
+                self.step('Setting binary transfer mode')
                 c.voidcmd('TYPE I')
             except Exception:
                 c.close(); raise
             self.conn=c
         self.kind=protocol
+        self.step('Connection ready')
     def listdir(self,path):
         if self.kind=='SFTP':
             import stat

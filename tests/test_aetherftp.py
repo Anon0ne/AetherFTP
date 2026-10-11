@@ -74,7 +74,7 @@ def test_oversized_resume_preserves_file(tmp_path):
 def test_ftps_verifies_certificates(monkeypatch):
     import transfer_client
     ftp = Mock(); factory = Mock(return_value=ftp)
-    monkeypatch.setattr(transfer_client.ftplib, 'FTP_TLS', factory)
+    monkeypatch.setattr(transfer_client, 'ReuseFTP_TLS', factory)
     Client().connect('example.invalid',21,'test','test','FTPS')
     context = factory.call_args.kwargs['context']
     assert context.check_hostname
@@ -126,6 +126,7 @@ def test_error_logs_do_not_contain_server_response(tmp_path, monkeypatch):
     output = io.StringIO(); logger = logging.getLogger('privacy-test')
     logger.addHandler(logging.StreamHandler(output)); logger.setLevel(logging.INFO)
     session = Session(logger)
+    session.connection_secrets = ('secret-password', 'private-host')
     def fail(): raise RuntimeError('secret-password private-host')
     session.submit(fail)
     import time
@@ -171,6 +172,7 @@ def test_transfer_bars_and_timing_events(failure, monkeypatch):
     output = io.StringIO(); logger = logging.getLogger('transfer-test-' + str(failure))
     handler = logging.StreamHandler(output); logger.addHandler(handler); logger.setLevel(logging.INFO)
     session = Session(logger); session.connected = True
+    session.connection_secrets = ('secret', 'private host')
     monkeypatch.setattr(session, 'refresh_remote', lambda: None)
     ready = threading.Event(); release = threading.Event()
     def upload(source, dest, callback, resume):
@@ -234,9 +236,9 @@ def test_ftpes_url_defaults_and_ipv6():
 def test_ftpes_authenticates_tls_before_login(monkeypatch):
     import transfer_client
     ftp = Mock(); factory = Mock(return_value=ftp)
-    monkeypatch.setattr(transfer_client.ftplib, 'FTP_TLS', factory)
+    monkeypatch.setattr(transfer_client, 'ReuseFTP_TLS', factory)
     client = Client(); client.connect('example.invalid',2990,'sampleuser','secret','FTPES')
-    assert [c[0] for c in ftp.mock_calls] == ['connect','auth','login','prot_p','voidcmd']
+    assert [c[0] for c in ftp.mock_calls] == ['connect','auth','sock.version','login','prot_p','voidcmd']
     ftp.connect.assert_called_once_with('example.invalid',2990,timeout=20)
     assert factory.call_args.kwargs['context'].check_hostname
     assert client.kind == 'FTPES'
@@ -247,7 +249,7 @@ def test_ftpes_tls_failure_never_sends_credentials(monkeypatch):
     import ssl
     import transfer_client
     ftp = Mock(); ftp.auth.side_effect = ssl.SSLCertVerificationError('untrusted certificate')
-    monkeypatch.setattr(transfer_client.ftplib, 'FTP_TLS', Mock(return_value=ftp))
+    monkeypatch.setattr(transfer_client, 'ReuseFTP_TLS', Mock(return_value=ftp))
     with pytest.raises(ssl.SSLCertVerificationError): Client().connect('example.invalid',2990,'sampleuser','secret','FTPES')
     ftp.login.assert_not_called(); ftp.close.assert_called_once()
 
@@ -277,3 +279,63 @@ def test_gui_connection_url_load_and_file_selection(monkeypatch):
         assert session.remote_tree.selectedItems()[0].text(0) == 'sample.txt'
     finally:
         session.timer.stop(); session.jobs.put(None); session.worker.join(3)
+
+
+def test_tls_data_socket_reuses_control_session(monkeypatch):
+    import transfer_client
+    control = Mock(); data = Mock(); protected = Mock(); context = Mock()
+    context.wrap_socket.return_value = protected
+    ftp = transfer_client.ReuseFTP_TLS(context=context)
+    ftp.host = 'example.invalid'; ftp.sock = control; ftp._prot_p = True
+    base = Mock(return_value=(data,123)); monkeypatch.setattr(transfer_client.ftplib.FTP,'ntransfercmd',base)
+    assert ftp.ntransfercmd('RETR sample.txt',42) == (protected,123)
+    base.assert_called_once_with(ftp,'RETR sample.txt',42)
+    context.wrap_socket.assert_called_once_with(data,server_hostname='example.invalid',session=control.session)
+
+
+def test_failed_data_tls_closes_socket(monkeypatch):
+    import ssl
+    import transfer_client
+    data = Mock(); context = Mock(); context.wrap_socket.side_effect = ssl.SSLError('handshake failed')
+    ftp = transfer_client.ReuseFTP_TLS(context=context); ftp.host='example.invalid'; ftp.sock=Mock(); ftp._prot_p=True
+    monkeypatch.setattr(transfer_client.ftplib.FTP,'ntransfercmd',Mock(return_value=(data,None)))
+    with pytest.raises(ssl.SSLError): ftp.ntransfercmd('MLSD')
+    data.close.assert_called_once()
+
+
+def test_unprotected_data_does_not_wrap(monkeypatch):
+    import transfer_client
+    data=Mock(); context=Mock(); ftp=transfer_client.ReuseFTP_TLS(context=context)
+    monkeypatch.setattr(transfer_client.ftplib.FTP,'ntransfercmd',Mock(return_value=(data,None)))
+    assert ftp.ntransfercmd('NLST') == (data,None)
+    context.wrap_socket.assert_not_called()
+
+
+def test_server_errors_are_logged_with_credentials_redacted(monkeypatch):
+    import ftplib
+    import time
+    from PySide6.QtWidgets import QApplication
+    from aetherftp import Session
+    os.environ['QT_QPA_PLATFORM']='offscreen'
+    app=QApplication.instance() or QApplication([])
+    output=io.StringIO(); logger=logging.getLogger('server-error-test')
+    handler=logging.StreamHandler(output); logger.addHandler(handler); logger.setLevel(logging.INFO)
+    session=Session(logger)
+    session.host.setText('example.invalid'); session.user.setText('private-user'); session.password.setText('private-password')
+    def fail(*args):
+        session.client.step('Authenticating user')
+        raise ftplib.error_perm('530 Login incorrect for private-user on example.invalid; password=private-password')
+    monkeypatch.setattr(session.client,'connect',fail)
+    try:
+        session.connect_server()
+        deadline=time.monotonic()+3
+        while session.pending and time.monotonic()<deadline:
+            session.pump(); app.processEvents(); time.sleep(.01)
+        visible=session.log.toPlainText(); persisted=output.getvalue()
+        assert '530 Login incorrect' in visible and '530 Login incorrect' in persisted
+        assert 'Authenticating user' in visible
+        for secret in ('private-user','private-password','example.invalid'):
+            assert secret not in visible and secret not in persisted
+        assert session.activity.currentIndex()==1
+    finally:
+        session.timer.stop(); session.jobs.put(None); session.worker.join(3); logger.removeHandler(handler)
