@@ -21,16 +21,26 @@ from transfer_client import Client
 from version import __version__
 
 STYLE = '''
-QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 12pt; }
-QLineEdit, QComboBox, QTreeWidget, QPlainTextEdit { background: #151d2c; border: 1px solid #39465c; padding: 6px; }
-QPushButton { background: #202b3c; border: 1px solid #a78bfa; padding: 8px 14px; border-radius: 4px; }
-QPushButton:hover, QTabBar::tab:selected { background: #493b75; }
-QWidget:focus { border: 1px solid #38bdf8; }
-QHeaderView::section { background: #202b3c; color: #38bdf8; padding: 6px; }
-QTabBar::tab { background: #151d2c; padding: 10px; }
+QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
+QLabel, QCheckBox { background: transparent; }
+QWidget#panel, QWidget#connectionBar { background: #151d2c; border-radius: 5px; }
+QLineEdit, QComboBox { background: #202b3c; border: 1px solid #39465c; padding: 5px; border-radius: 3px; }
+QTreeWidget, QPlainTextEdit { background: #151d2c; border: none; }
+QTreeWidget::item { padding: 4px 2px; }
+QPushButton { background: #202b3c; border: 1px solid #39465c; padding: 6px 12px; border-radius: 3px; }
+QPushButton#primary { background: #a78bfa; color: #0b101b; border: none; font-weight: 600; }
+QPushButton:hover, QTabBar::tab:selected { background: #493b75; color: #e4eaf5; }
+QLineEdit:focus, QComboBox:focus, QPushButton:focus, QTreeWidget:focus { border: 1px solid #38bdf8; }
+QHeaderView::section { background: #202b3c; color: #9caac1; border: none; padding: 6px; }
+QTabBar::tab { background: #151d2c; padding: 5px 16px; margin-right: 3px; }
+QTabWidget::pane { border: none; }
 QTreeWidget::item:selected { background: #493b75; }
-QLabel#brand { color: #a78bfa; font-size: 21pt; }
+QLabel#brand { color: #a78bfa; font-size: 20pt; font-weight: 600; }
+QLabel#muted { color: #9caac1; }
+QLabel#localHeading { color: #38bdf8; font-weight: 600; }
+QLabel#remoteHeading { color: #a78bfa; font-weight: 600; }
 '''
+
 
 
 def configure_logging():
@@ -77,44 +87,69 @@ class Session(QWidget):
         self.worker = threading.Thread(target=self.run_jobs, daemon=True)
         self.worker.start()
         layout = QVBoxLayout(self)
-        form = QGridLayout()
+        layout.setContentsMargins(0, 8, 0, 0); layout.setSpacing(8)
+        connection = QWidget(); connection.setObjectName('connectionBar')
+        form = QHBoxLayout(connection); form.setContentsMargins(10, 8, 10, 8); form.setSpacing(8)
         self.protocol = QComboBox(); self.protocol.addItems(['SFTP', 'FTPS', 'FTP'])
         self.host = QLineEdit(); self.port = QLineEdit('22')
         self.user = QLineEdit(); self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        for column, (name, widget) in enumerate([('Protocol', self.protocol), ('Host', self.host), ('Port', self.port), ('Username', self.user), ('Password', self.password)]):
-            label = QLabel(name); label.setBuddy(widget)
+        for name, widget, stretch in [('Protocol', self.protocol, 0), ('Host / IP', self.host, 2), ('Port', self.port, 0), ('Username', self.user, 1), ('Password', self.password, 1)]:
+            field = QVBoxLayout(); field.setSpacing(3)
+            label = QLabel(name); label.setObjectName('muted'); label.setBuddy(widget)
             widget.setAccessibleName(name)
-            form.addWidget(label, 0, column); form.addWidget(widget, 1, column)
-        self.port.setMaximumWidth(100)
+            field.addWidget(label); field.addWidget(widget); form.addLayout(field, stretch)
+        self.protocol.setFixedWidth(82); self.port.setFixedWidth(58)
+        self.host.setMinimumWidth(120); self.user.setMinimumWidth(85); self.password.setMinimumWidth(85)
         self.protocol.currentTextChanged.connect(lambda value: self.port.setText('22' if value == 'SFTP' else '21'))
-        layout.addLayout(form)
-        bar = QHBoxLayout()
-        for name, action in [('Connect', self.connect_server), ('Disconnect', self.disconnect), ('Server Book', self.server_book)]:
-            button = QPushButton(name); button.clicked.connect(action); bar.addWidget(button)
-        layout.addLayout(bar)
-        self.status = QLabel('OFFLINE'); layout.addWidget(self.status)
-        split = QSplitter(); layout.addWidget(split, 1)
+        for name, action in [('Server Book', self.server_book), ('Connect', self.connect_server), ('Disconnect', self.disconnect)]:
+            button = QPushButton(name); button.clicked.connect(action)
+            if name == 'Connect': button.setObjectName('primary')
+            form.addWidget(button, 0, Qt.AlignmentFlag.AlignBottom)
+        layout.addWidget(connection)
+        self.status = QLabel('● OFFLINE'); self.status.setObjectName('muted'); layout.addWidget(self.status)
+        split = QSplitter(); split.setChildrenCollapsible(False); layout.addWidget(split, 1)
+        self.file_splitter = split
         for side in ('local', 'remote'):
-            panel = QWidget(); box = QVBoxLayout(panel)
-            box.addWidget(QLabel(side.upper() + ' FILESYSTEM'))
+            panel = QWidget(); panel.setObjectName('panel')
+            box = QVBoxLayout(panel); box.setContentsMargins(10, 10, 10, 10); box.setSpacing(8)
+            heading = QHBoxLayout()
+            title = QLabel('◧  ' + side.upper() + ' FILESYSTEM'); title.setObjectName(side + 'Heading'); heading.addWidget(title)
+            heading.addStretch()
+            refresh = QPushButton('↻'); refresh.setToolTip('Refresh ' + side + ' files'); refresh.setAccessibleName('Refresh ' + side + ' files')
+            refresh.clicked.connect(self.refresh_local if side == 'local' else self.refresh_remote); heading.addWidget(refresh)
+            box.addLayout(heading)
             path = QLineEdit(str(self.local_path) if side == 'local' else '/')
+            path.setAccessibleName(side.title() + ' directory')
             path.returnPressed.connect(lambda s=side: self.navigate(s))
             box.addWidget(path); setattr(self, side + '_display', path)
             tree = FileTree(self.upload_paths if side == 'remote' else None)
+            tree.setMinimumHeight(80)
             tree.itemDoubleClicked.connect(lambda item, col, s=side: self.open_item(s, item))
-            box.addWidget(tree); setattr(self, side + '_tree', tree)
-            refresh = QPushButton('Refresh'); refresh.clicked.connect(self.refresh_local if side == 'local' else self.refresh_remote); box.addWidget(refresh)
-            transfer = QPushButton('Upload selected →' if side == 'local' else '← Download selected')
-            transfer.clicked.connect(self.upload_selected if side == 'local' else self.download_selected); box.addWidget(transfer)
-            split.addWidget(panel)
-        self.resume = QCheckBox('Resume partial files (destination must match the source prefix)')
-        layout.addWidget(self.resume)
-        self.transfers = QTreeWidget(); self.transfers.setHeaderLabels(['Transfer queue', 'State / progress']); self.transfers.setMaximumHeight(150)
+            box.addWidget(tree, 1); setattr(self, side + '_tree', tree)
+            footer = QHBoxLayout(); footer.addStretch()
+            transfer = QPushButton('UPLOAD  →' if side == 'local' else '←  DOWNLOAD')
+            transfer.clicked.connect(self.upload_selected if side == 'local' else self.download_selected); footer.addWidget(transfer)
+            box.addLayout(footer); split.addWidget(panel)
+        split.setSizes([580, 580])
+        activity_bar = QHBoxLayout()
+        self.activity_toggle = QPushButton('▸ Transfer activity')
+        self.activity_toggle.setCheckable(True); self.activity_toggle.toggled.connect(self.toggle_activity)
+        activity_bar.addWidget(self.activity_toggle); activity_bar.addStretch()
+        self.resume = QCheckBox('Resume partial files')
+        self.resume.setToolTip('Use only when the destination contains the exact source prefix.')
+        activity_bar.addWidget(self.resume); layout.addLayout(activity_bar)
+        self.activity = QTabWidget(); self.activity.setFixedHeight(110)
+        self.transfers = QTreeWidget(); self.transfers.setHeaderLabels(['Transfer queue', 'State / progress'])
         self.transfers.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.transfers)
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(90); layout.addWidget(self.log)
+        self.activity.addTab(self.transfers, 'Queue')
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.activity.addTab(self.log, 'Event log')
+        layout.addWidget(self.activity); self.activity.hide()
         self.timer = QTimer(self); self.timer.timeout.connect(self.pump); self.timer.start(50)
         self.refresh_local()
+    def toggle_activity(self, visible):
+        self.activity.setVisible(visible)
+        self.activity_toggle.setText(('▾' if visible else '▸') + ' Transfer activity')
+
     def submit(self, action, success=None, row=None):
         self.pending += 1
         self.jobs.put((action, success, row))
@@ -315,12 +350,17 @@ class ServerBook(QDialog):
 class App(QMainWindow):
     def __init__(self, logger):
         super().__init__(); self.logger = logger
-        self.setWindowTitle('AetherFTP ' + __version__); self.resize(1180, 900)
-        root = QWidget(); layout = QVBoxLayout(root); self.setCentralWidget(root)
-        brand = QLabel('◈ AETHER / FTP'); brand.setObjectName('brand'); layout.addWidget(brand)
-        layout.addWidget(QLabel('Engineering File Transfer • Built by Anon0ne'))
-        button = QPushButton('New connection tab'); button.clicked.connect(self.add_tab); layout.addWidget(button)
-        self.tabs = QTabWidget(); self.tabs.setTabsClosable(True); self.tabs.tabCloseRequested.connect(self.close_tab); layout.addWidget(self.tabs)
+        self.setWindowTitle('AetherFTP ' + __version__); self.resize(1180, 760); self.setMinimumSize(960, 600)
+        root = QWidget(); layout = QVBoxLayout(root); layout.setContentsMargins(20, 16, 20, 16); layout.setSpacing(10); self.setCentralWidget(root)
+        header = QHBoxLayout()
+        brand = QLabel('◈ AETHER / FTP'); brand.setObjectName('brand'); header.addWidget(brand)
+        caption = QLabel('ENGINEERING FILE TRANSFER'); caption.setObjectName('muted'); header.addWidget(caption)
+        header.addStretch()
+        credit = QLabel('Built by Anon0ne'); credit.setObjectName('muted'); header.addWidget(credit)
+        layout.addLayout(header)
+        self.tabs = QTabWidget(); self.tabs.setTabsClosable(True); self.tabs.tabCloseRequested.connect(self.close_tab)
+        button = QPushButton('+ New tab'); button.clicked.connect(self.add_tab)
+        self.tabs.setCornerWidget(button, Qt.Corner.TopRightCorner); layout.addWidget(self.tabs, 1)
         self.add_tab()
     def add_tab(self):
         self.tabs.setCurrentIndex(self.tabs.addTab(Session(self.logger), 'Connection ' + str(self.tabs.count() + 1)))

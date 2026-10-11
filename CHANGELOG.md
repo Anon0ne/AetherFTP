@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — 2026-10-11
+
+- Restore compact connection toolbar and original-style purple/cyan file panels.
+- Give file lists the expanding window space; collapse transfer activity by default.
+- Move new-tab and refresh actions into compact header controls.
+
+
 ## 0.4.0 — 2026-10-11
 
 - Pin PySide6 6.8.3 for verified Windows packaging.

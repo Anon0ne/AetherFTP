@@ -1,4 +1,4 @@
-# AetherFTP 0.4.0
+# AetherFTP 0.4.1
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -18,7 +18,7 @@ python -m venv .venv
 
 ## Connections and transfers
 
-Each connection tab has independent credentials, paths and a sequential transfer queue. Select multiple files to upload or download. Drop files from Explorer onto the remote file pane to upload. Directory transfers, queue cancellation, persisted queues, and internal pane-to-pane drag-and-drop are future work.
+Each connection tab has independent credentials, paths and a sequential transfer queue. File panes expand with the window. Use **Transfer activity** at the bottom to show or hide the queue and event log. Select multiple files to upload or download. Drop files from Explorer onto the remote file pane to upload. Directory transfers, queue cancellation, persisted queues, and internal pane-to-pane drag-and-drop are future work.
 
 Enable **Resume partial files** only when the destination contains the exact initial bytes of the same source file. Resume verifies sizes but does not verify file identity or hashes. Upload resume requires an existing remote file. FTP servers must support SIZE and REST; unsupported resume fails without a fallback overwrite. Failed transfers remain visible and can be requeued using the file selection controls. Finish queued work before disconnecting or closing a tab.
 
