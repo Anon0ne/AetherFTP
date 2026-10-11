@@ -1,328 +1,352 @@
-"""AetherFTP: dark desktop FTP/FTPS/SFTP client."""
-import ftplib
+"""AetherFTP desktop client. Project builder: Anon0ne."""
+import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
-import queue
-import threading
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
-from server_book import load_profiles, save_profiles, encrypt_password, decrypt_password
+import posixpath
+import queue
+import sys
+import threading
+import uuid
 
-BG='#0b101b'; PANEL='#151d2c'; INPUT='#202b3c'; FG='#e4eaf5'; MUTED='#9caac1'; PURPLE='#a78bfa'; CYAN='#38bdf8'
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTabWidget,
+    QSplitter, QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
+    QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView)
+from server_book import (load_profiles, save_profiles, encrypt_password,
+    profile_password, windows_vault, STORE)
+from transfer_client import Client
+from version import __version__
 
-class Client:
-    def __init__(self):
-        self.conn=None; self.transport=None; self.kind=None
-    def connect(self, host, port, username, password, protocol):
-        self.close()
-        if protocol=='SFTP':
-            try: import paramiko
-            except ImportError as exc: raise RuntimeError('SFTP requires paramiko: pip install paramiko') from exc
-            ssh=paramiko.SSHClient(); ssh.load_system_host_keys(); ssh.load_host_keys(os.path.expanduser('~/.ssh/known_hosts')) if os.path.exists(os.path.expanduser('~/.ssh/known_hosts')) else None
-            ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
-            ssh.connect(hostname=host,port=port,username=username,password=password,timeout=20,look_for_keys=False,allow_agent=False)
-            self.transport=ssh; self.conn=ssh.open_sftp()
-        else:
-            cls=ftplib.FTP_TLS if protocol=='FTPS' else ftplib.FTP
-            c=cls(); c.connect(host,port,timeout=20); c.login(username,password)
-            if protocol=='FTPS': c.prot_p()
-            self.conn=c
-        self.kind=protocol
-    def listdir(self,path):
-        if self.kind=='SFTP':
-            import stat
-            return sorted([(a.filename,stat.S_ISDIR(a.st_mode),a.st_size) for a in self.conn.listdir_attr(path)],key=lambda x:(not x[1],x[0].lower()))
-        entries=[]
-        try:
-            for name,facts in self.conn.mlsd(path):
-                if name in ('.','..'):continue
-                entries.append((name,facts.get('type')=='dir',int(facts.get('size','0'))))
-        except (ftplib.error_perm,AttributeError):
-            old=self.conn.pwd(); self.conn.cwd(path)
+STYLE = '''
+QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 12pt; }
+QLineEdit, QComboBox, QTreeWidget, QPlainTextEdit { background: #151d2c; border: 1px solid #39465c; padding: 6px; }
+QPushButton { background: #202b3c; border: 1px solid #a78bfa; padding: 8px 14px; border-radius: 4px; }
+QPushButton:hover, QTabBar::tab:selected { background: #493b75; }
+QWidget:focus { border: 1px solid #38bdf8; }
+QHeaderView::section { background: #202b3c; color: #38bdf8; padding: 6px; }
+QTabBar::tab { background: #151d2c; padding: 10px; }
+QTreeWidget::item:selected { background: #493b75; }
+QLabel#brand { color: #a78bfa; font-size: 21pt; }
+'''
+
+
+def configure_logging():
+    folder = STORE.parent / 'logs'
+    folder.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(folder / 'aetherftp.jsonl', maxBytes=1_000_000, backupCount=3, encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    logger = logging.getLogger('aetherftp')
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    return logger
+
+
+class FileTree(QTreeWidget):
+    def __init__(self, drop=None):
+        super().__init__()
+        self.setHeaderLabels(['Name', 'Size'])
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self.drop_files = drop
+        self.setAcceptDrops(drop is not None)
+    def dragEnterEvent(self, event):
+        if self.drop_files and event.mimeData().hasUrls(): event.acceptProposedAction()
+    def dragMoveEvent(self, event):
+        if self.drop_files and event.mimeData().hasUrls(): event.acceptProposedAction()
+    def dropEvent(self, event):
+        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        self.drop_files(paths)
+        event.acceptProposedAction()
+
+
+class Session(QWidget):
+    """One serialized worker per connection; widgets only change on the GUI thread."""
+    def __init__(self, logger):
+        super().__init__()
+        self.logger = logger
+        self.client = Client()
+        self.jobs = queue.Queue()
+        self.events = queue.Queue()
+        self.pending = 0
+        self.connected = False
+        self.local_path = Path.home()
+        self.remote_path = '/'
+        self.worker = threading.Thread(target=self.run_jobs, daemon=True)
+        self.worker.start()
+        layout = QVBoxLayout(self)
+        form = QGridLayout()
+        self.protocol = QComboBox(); self.protocol.addItems(['SFTP', 'FTPS', 'FTP'])
+        self.host = QLineEdit(); self.port = QLineEdit('22')
+        self.user = QLineEdit(); self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        for column, (name, widget) in enumerate([('Protocol', self.protocol), ('Host', self.host), ('Port', self.port), ('Username', self.user), ('Password', self.password)]):
+            label = QLabel(name); label.setBuddy(widget)
+            widget.setAccessibleName(name)
+            form.addWidget(label, 0, column); form.addWidget(widget, 1, column)
+        self.port.setMaximumWidth(100)
+        self.protocol.currentTextChanged.connect(lambda value: self.port.setText('22' if value == 'SFTP' else '21'))
+        layout.addLayout(form)
+        bar = QHBoxLayout()
+        for name, action in [('Connect', self.connect_server), ('Disconnect', self.disconnect), ('Server Book', self.server_book)]:
+            button = QPushButton(name); button.clicked.connect(action); bar.addWidget(button)
+        layout.addLayout(bar)
+        self.status = QLabel('OFFLINE'); layout.addWidget(self.status)
+        split = QSplitter(); layout.addWidget(split, 1)
+        for side in ('local', 'remote'):
+            panel = QWidget(); box = QVBoxLayout(panel)
+            box.addWidget(QLabel(side.upper() + ' FILESYSTEM'))
+            path = QLineEdit(str(self.local_path) if side == 'local' else '/')
+            path.returnPressed.connect(lambda s=side: self.navigate(s))
+            box.addWidget(path); setattr(self, side + '_display', path)
+            tree = FileTree(self.upload_paths if side == 'remote' else None)
+            tree.itemDoubleClicked.connect(lambda item, col, s=side: self.open_item(s, item))
+            box.addWidget(tree); setattr(self, side + '_tree', tree)
+            refresh = QPushButton('Refresh'); refresh.clicked.connect(self.refresh_local if side == 'local' else self.refresh_remote); box.addWidget(refresh)
+            transfer = QPushButton('Upload selected →' if side == 'local' else '← Download selected')
+            transfer.clicked.connect(self.upload_selected if side == 'local' else self.download_selected); box.addWidget(transfer)
+            split.addWidget(panel)
+        self.resume = QCheckBox('Resume partial files (destination must match the source prefix)')
+        layout.addWidget(self.resume)
+        self.transfers = QTreeWidget(); self.transfers.setHeaderLabels(['Transfer queue', 'State / progress']); self.transfers.setMaximumHeight(150)
+        self.transfers.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.transfers)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(90); layout.addWidget(self.log)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.pump); self.timer.start(50)
+        self.refresh_local()
+    def submit(self, action, success=None, row=None):
+        self.pending += 1
+        self.jobs.put((action, success, row))
+    def run_jobs(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                self.client.close(); return
+            action, success, row = job
             try:
-                for name in self.conn.nlst():
-                    short=name.rstrip('/').split('/')[-1]
-                    if short in ('.','..'):continue
-                    isdir=False
-                    try:self.conn.cwd(name); isdir=True; self.conn.cwd(path)
-                    except ftplib.error_perm:pass
-                    entries.append((short,isdir,0))
-            finally:self.conn.cwd(old)
-        return sorted(entries,key=lambda x:(not x[1],x[0].lower()))
-    def download(self,remote,local,callback):
-        if self.kind=='SFTP': self.conn.get(remote,local,callback=callback)
-        else:
-            with open(local,'wb') as f:
-                count=[0]
-                def block(data):
-                    f.write(data); count[0]+=len(data); callback(count[0],0)
-                self.conn.retrbinary('RETR '+remote,block)
-    def upload(self,local,remote,callback):
-        if self.kind=='SFTP': self.conn.put(local,remote,callback=callback)
-        else:
-            with open(local,'rb') as f:
-                count=[0]
-                def block(data):count[0]+=len(data);callback(count[0],os.path.getsize(local))
-                self.conn.storbinary('STOR '+remote,f,callback=block)
-    def close(self):
-        for obj in (self.conn,self.transport):
-            if obj:
-                try:obj.close()
-                except Exception:pass
-        self.conn=None;self.transport=None;self.kind=None
-
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__(); self.title('AetherFTP | Engineering File Transfer'); self.geometry('1180x760');self.minsize(900,580)
-        self.configure(bg=BG);self.client=Client();self.events=queue.Queue();self.lock=threading.Lock();self.busy=False
-        self.remote_path='/';self.local_path=Path.home();self.entries={}
-        style=ttk.Style(self);style.theme_use('clam')
-        style.configure('Treeview',background=PANEL,foreground=FG,fieldbackground=PANEL,rowheight=29,borderwidth=0,font=('Segoe UI',10))
-        style.map('Treeview',background=[('selected','#493b75')]);style.configure('Treeview.Heading',background=INPUT,foreground=FG,font=('Segoe UI',10,'bold'),relief='flat')
-        self.make_ui();self.refresh_local();self.after(80,self.pump);self.protocol_changed()
-        self.protocol.trace_add('write',lambda *_:self.protocol_changed())
-        self.protocol_changed()
-        self.protocol_menu.configure(bg=INPUT,fg=FG,activebackground='#44365e',activeforeground=FG,highlightthickness=0)
-        self.protocol_menu['menu'].configure(bg=INPUT,fg=FG)
-        self.protocol.set('SFTP')
-    def label(self,parent,text,color=FG,size=10,bold=False,**kw):
-        return tk.Label(parent,text=text,bg=parent.cget('bg'),fg=color,font=('Segoe UI',size,'bold' if bold else 'normal'),**kw)
-    def btn(self,parent,text,command,color=INPUT):
-        return tk.Button(parent,text=text,command=command,bg=color,fg=FG,activebackground='#4c3b70',activeforeground='white',relief='flat',padx=13,pady=9,cursor='hand2',font=('Segoe UI',10,'bold'))
-    def make_ui(self):
-        top=tk.Frame(self,bg=BG);top.pack(fill='x',padx=22,pady=(18,12))
-        self.label(top,'◈  AETHER / FTP',PURPLE,20,True).pack(side='left');self.label(top,'   ENGINEERING FILE TRANSFER',MUTED,9).pack(side='left',pady=9)
-        bar=tk.Frame(self,bg=PANEL,padx=12,pady=12);bar.pack(fill='x',padx=22)
-        self.protocol=tk.StringVar(value='SFTP');self.protocol_menu=tk.OptionMenu(bar,self.protocol,'SFTP','FTPS','FTP');self.protocol_menu.pack(side='left',padx=(0,8))
-        self.host=self.field(bar,'Host / IP','192.168.1.100',22);self.port=self.field(bar,'Port','22',6)
-        self.user=self.field(bar,'Username','',14);self.password=self.field(bar,'Password','',14,show='*')
-        self.btn(bar,'SERVER BOOK',self.open_server_book).pack(side='left',padx=5)
-        self.btn(bar,'CONNECT',self.connect,PURPLE).pack(side='left',padx=5)
-        self.btn(bar,'DISCONNECT',self.disconnect).pack(side='left')
-        self.status=tk.StringVar(value='●  OFFLINE');self.label(self,self.status,MUTED,10,True).pack(anchor='w',padx=25,pady=10)
-        panes=tk.PanedWindow(self,orient='horizontal',bg=BG,sashwidth=7,bd=0);panes.pack(fill='both',expand=True,padx=22)
-        for side in ('local','remote'):
-            frame=tk.Frame(panes,bg=PANEL,padx=10,pady=10);panes.add(frame,minsize=280)
-            header=tk.Frame(frame,bg=PANEL);header.pack(fill='x')
-            self.label(header,'◧  '+side.upper()+' FILESYSTEM',CYAN if side=='local' else PURPLE,11,True).pack(side='left')
-            self.btn(header,'↻',self.refresh_local if side=='local' else self.refresh_remote).pack(side='right')
-            p=tk.StringVar(value=str(self.local_path) if side=='local' else '/');setattr(self,side+'_display',p)
-            entry=tk.Entry(frame,textvariable=p,bg=INPUT,fg=FG,insertbackground=FG,relief='flat',font=('Consolas',10));entry.pack(fill='x',pady=(10,8),ipady=8)
-            entry.bind('<Return>',lambda e,s=side:self.go_path(s))
-            tree=ttk.Treeview(frame,columns=('size',),show='tree headings',selectmode='browse');tree.heading('#0',text='NAME');tree.heading('size',text='SIZE');tree.column('#0',width=300);tree.column('size',width=90,anchor='e');tree.pack(fill='both',expand=True)
-            tree.bind('<Double-1>',lambda e,s=side:self.open_item(s))
-            setattr(self,side+'_tree',tree)
-            foot=tk.Frame(frame,bg=PANEL);foot.pack(fill='x',pady=(8,0))
-            if side=='local':self.btn(foot,'UPLOAD  →',self.upload).pack(side='right')
-            else:self.btn(foot,'←  DOWNLOAD',self.download).pack(side='left')
-        bottom=tk.Frame(self,bg=PANEL,padx=12,pady=10);bottom.pack(fill='x',padx=22,pady=(12,18))
-        self.label(bottom,'TRANSFER ACTIVITY / EVENT LOG',PURPLE,10,True).pack(anchor='w')
-        self.progress=ttk.Progressbar(bottom,mode='determinate');self.progress.pack(fill='x',pady=8)
-        self.logbox=tk.Text(bottom,height=5,bg=BG,fg=MUTED,insertbackground=FG,relief='flat',font=('Consolas',9),state='disabled');self.logbox.pack(fill='x')
-        self.log('Ready. SFTP is recommended. Plain FTP is unencrypted.')
-    def field(self,parent,name,default,width,show=None):
-        wrap=tk.Frame(parent,bg=PANEL);wrap.pack(side='left',padx=5)
-        self.label(wrap,name,MUTED,8).pack(anchor='w')
-        ent=tk.Entry(wrap,width=width,bg=INPUT,fg=FG,insertbackground=FG,relief='flat',show=show,font=('Consolas',10));ent.insert(0,default);ent.pack(ipady=7)
-        return ent
-    def protocol_changed(self):
-        self.port.delete(0,'end');self.port.insert(0,{'SFTP':'22','FTPS':'21','FTP':'21'}[self.protocol.get()])
-    def log(self,message):
-        self.logbox.configure(state='normal');self.logbox.insert('end',message+'\n');self.logbox.see('end');self.logbox.configure(state='disabled')
-    def work(self,fn):
-        if self.busy:self.log('Another operation is still running.');return
-        self.busy=True
-        def runner():
-            try:
-                with self.lock:fn()
-            except Exception as exc:self.events.put(('error',str(exc)))
-            finally:self.events.put(('idle',))
-        threading.Thread(target=runner,daemon=True).start()
+                if row is not None: self.events.put(('state', row, 'Running'))
+                result = action()
+                self.events.put(('success', success, result, row))
+            except Exception as exc:
+                # Log types only: protocol exceptions can contain private server responses.
+                self.events.put(('error', type(exc).__name__, row))
+            finally: self.events.put(('done',))
     def pump(self):
+        while not self.events.empty():
+            event = self.events.get_nowait()
+            if event[0] == 'done': self.pending -= 1
+            elif event[0] == 'state': self.transfers.topLevelItem(event[1]).setText(1, event[2])
+            elif event[0] == 'success':
+                if event[3] is not None: self.transfers.topLevelItem(event[3]).setText(1, 'Completed')
+                if event[1]: event[1](event[2])
+            elif event[0] == 'error':
+                self.status.setText('ERROR: ' + event[1] + ' — verify connection, paths and permissions')
+                self.log.appendPlainText(self.status.text())
+                self.logger.error(json.dumps({'event': 'operation_failed', 'error_type': event[1]}))
+                if event[2] is not None: self.transfers.topLevelItem(event[2]).setText(1, 'Failed — requeue to retry')
+    def connect_server(self):
+        if self.pending:
+            self.status.setText('Wait for queued operations before reconnecting'); return
         try:
-            while True:
-                event=self.events.get_nowait();kind=event[0]
-                if kind=='log':self.log(event[1])
-                elif kind=='error':self.log('ERROR: '+event[1]);self.status.set('●  ERROR')
-                elif kind=='idle':self.busy=False
-                elif kind=='connected':self.status.set('●  CONNECTED  |  '+event[1]);self.log('Connected using '+event[1]);self.refresh_remote()
-                elif kind=='remote':
-                    self.remote_path=event[1];self.remote_display.set(event[1]);self.entries={}
-                    self.remote_tree.delete(*self.remote_tree.get_children())
-                    if event[1]!='/':self.remote_tree.insert('','end',iid='..',text='📁  ..',values=('PARENT',))
-                    for i,(name,isdir,size) in enumerate(event[2]):
-                        iid='f'+str(i);self.entries[iid]=(name,isdir)
-                        self.remote_tree.insert('','end',iid=iid,text=('📁  ' if isdir else '◻  ')+name,values=('<DIR>' if isdir else self.size(size),))
-                elif kind=='progress':self.progress['value']=event[1]
-                elif kind=='local_refresh':self.refresh_local()
-        except queue.Empty:pass
-        self.after(80,self.pump)
-    @staticmethod
-    def size(n):
-        for unit in ('B','KB','MB','GB','TB'):
-            if n<1024:return f'{n:.0f} {unit}' if unit=='B' else f'{n:.1f} {unit}'
-            n/=1024
-        return f'{n:.1f} PB'
-    def connect(self):
-        host=self.host.get().strip();username=self.user.get();password=self.password.get();proto=self.protocol.get()
-        try:
-            port=int(self.port.get())
-            if not 1 <= port <= 65535: raise ValueError('Port outside range')
+            port = int(self.port.text())
+            if not 1 <= port <= 65535 or not self.host.text().strip(): raise ValueError()
         except ValueError:
-            messagebox.showerror('Invalid port','Enter a port between 1 and 65535.');return
-        if not host:return
-        def job():
-            self.client.connect(host,port,username,password,proto)
-            self.events.put(('connected',proto+'  '+host))
-        self.work(job)
-    def open_server_book(self):
-        win=tk.Toplevel(self);win.title('AetherFTP | Server Book');win.geometry('760x480');win.configure(bg=BG)
-        try: profiles=load_profiles()
-        except Exception as exc:
-            messagebox.showerror('Server Book',str(exc),parent=win);profiles=[]
-        outer=tk.Frame(win,bg=BG,padx=18,pady=16);outer.pack(fill='both',expand=True)
-        self.label(outer,'◈  SERVER BOOK',PURPLE,17,True).pack(anchor='w',pady=(0,12))
-        tree=ttk.Treeview(outer,columns=('host','protocol','user'),show='tree headings',height=9)
-        tree.heading('#0',text='PROFILE');tree.heading('host',text='HOST');tree.heading('protocol',text='PROTOCOL');tree.heading('user',text='USERNAME')
-        tree.column('#0',width=180);tree.column('host',width=200);tree.column('protocol',width=85);tree.column('user',width=140)
-        tree.pack(fill='both',expand=True)
-        def redraw():
-            tree.delete(*tree.get_children())
-            for i,p in enumerate(profiles):tree.insert('','end',iid=str(i),text=p['name'],values=(p['host'],p['protocol'],p['username']))
-        def selected():
-            sel=tree.selection();return int(sel[0]) if sel else None
-        def persist():
-            try:save_profiles(profiles);redraw()
-            except Exception as exc:messagebox.showerror('Server Book',str(exc),parent=win)
-        def load(connect=False):
-            i=selected()
-            if i is None:return
-            p=profiles[i]
-            for widget,value in ((self.host,p['host']),(self.port,str(p['port'])),(self.user,p['username']),(self.password,'')):
-                widget.delete(0,'end');widget.insert(0,value)
-            self.protocol.set(p['protocol'])
-            self.port.delete(0,'end');self.port.insert(0,str(p['port']))
-            if p.get('password_dpapi'):
-                try:self.password.insert(0,decrypt_password(p['password_dpapi']))
-                except Exception as exc:messagebox.showwarning('Credential unavailable','Could not decrypt saved password: '+str(exc),parent=win)
-            win.destroy()
-            if connect:self.connect()
-        def editor(index=None):
-            old=profiles[index] if index is not None else {}
-            dlg=tk.Toplevel(win);dlg.title('Edit server' if old else 'New server');dlg.geometry('440x425');dlg.configure(bg=BG);dlg.transient(win);dlg.grab_set()
-            body=tk.Frame(dlg,bg=BG,padx=18,pady=14);body.pack(fill='both',expand=True)
-            fields={}
-            defaults={'name':'','host':self.host.get(),'port':self.port.get(),'username':self.user.get(),'password':''}
-            for key,label in [('name','Profile Name'),('host','Hostname / IP'),('port','Port'),('username','Username'),('password','Password (optional)')]:
-                self.label(body,label,MUTED,9).pack(anchor='w')
-                ent=tk.Entry(body,bg=INPUT,fg=FG,insertbackground=FG,relief='flat',show='*' if key=='password' else None)
-                ent.insert(0,old.get(key,defaults[key]));ent.pack(fill='x',ipady=5,pady=(2,7));fields[key]=ent
-            protocol=tk.StringVar(value=old.get('protocol',self.protocol.get()))
-            tk.OptionMenu(body,protocol,'SFTP','FTPS','FTP').pack(anchor='w')
-            save_pw=tk.BooleanVar(value=bool(old.get('password_dpapi')))
-            tk.Checkbutton(body,text='Save encrypted password (Windows DPAPI)',variable=save_pw,bg=BG,fg=FG,selectcolor=INPUT,activebackground=BG,activeforeground=FG).pack(anchor='w',pady=6)
-            def save():
-                name=fields['name'].get().strip();host=fields['host'].get().strip()
-                try:port=int(fields['port'].get());assert 1<=port<=65535
-                except (ValueError,AssertionError):messagebox.showerror('Invalid port','Port must be 1–65535.',parent=dlg);return
-                if not name or not host:messagebox.showerror('Required','Profile name and hostname are required.',parent=dlg);return
-                if any(p['name'].casefold()==name.casefold() for j,p in enumerate(profiles) if j!=index):
-                    messagebox.showerror('Duplicate','A profile with that name exists.',parent=dlg);return
-                item={'name':name,'host':host,'port':port,'username':fields['username'].get(),'protocol':protocol.get()}
-                if save_pw.get():
-                    password=fields['password'].get()
-                    try:
-                        if password:item['password_dpapi']=encrypt_password(password)
-                        elif old.get('password_dpapi'):item['password_dpapi']=old['password_dpapi']
-                    except Exception as exc:messagebox.showerror('Encryption failed',str(exc),parent=dlg);return
-                if index is None:profiles.append(item)
-                else:profiles[index]=item
-                persist();dlg.destroy()
-            self.btn(body,'SAVE PROFILE',save,PURPLE).pack(anchor='e',pady=4)
-        def remove():
-            i=selected()
-            if i is not None and messagebox.askyesno('Delete profile','Delete selected server profile?',parent=win):
-                profiles.pop(i);persist()
-        def duplicate():
-            i=selected()
-            if i is None:return
-            copy=profiles[i].copy();copy['name']+=' (copy)';profiles.append(copy);persist()
-        buttons=tk.Frame(outer,bg=BG);buttons.pack(fill='x',pady=(12,0))
-        for label,fn in [('NEW',lambda:editor()),('EDIT',lambda:editor(selected()) if selected() is not None else None),('DUPLICATE',duplicate),('DELETE',remove),('LOAD',load),('CONNECT',lambda:load(True))]:
-            self.btn(buttons,label,fn,PURPLE if label=='CONNECT' else INPUT).pack(side='left',padx=(0,5))
-        tree.bind('<Double-1>',lambda e:load(True));redraw()
-
+            self.status.setText('Enter a host and port between 1 and 65535'); return
+        args = (self.host.text().strip(), port, self.user.text(), self.password.text(), self.protocol.currentText())
+        self.connected = False
+        self.status.setText('CONNECTING…')
+        self.submit(lambda: self.client.connect(*args), self.on_connected)
+    def on_connected(self, _):
+        self.connected = True; self.status.setText('CONNECTED'); self.refresh_remote()
+        self.logger.info(json.dumps({'event': 'connected', 'protocol': self.protocol.currentText()}))
     def disconnect(self):
-        self.work(lambda:(self.client.close(),self.events.put(('log','Disconnected.'))))
-        self.status.set('●  OFFLINE')
+        if self.pending: self.status.setText('Wait for queued operations before disconnecting'); return
+        self.connected = False
+        self.submit(self.client.close, lambda _: self.status.setText('OFFLINE'))
     def refresh_local(self):
-        self.local_display.set(str(self.local_path)) if hasattr(self,'local_display') else None
-        tree=getattr(self,'local_tree',None)
-        if tree is None:return
-        tree.delete(*tree.get_children())
-        if self.local_path.parent!=self.local_path:tree.insert('','end',iid='..',text='📁  ..',values=('PARENT',))
         try:
-            for i,p in enumerate(sorted(self.local_path.iterdir(),key=lambda p:(not p.is_dir(),p.name.lower()))):
-                tree.insert('','end',iid=str(i),text=('📁  ' if p.is_dir() else '◻  ')+p.name,values=('<DIR>' if p.is_dir() else self.size(p.stat().st_size),),tags=(str(p),))
-        except OSError as exc:self.log('Local filesystem error: '+str(exc))
+            entries = [('..', True, 0, str(self.local_path.parent))]
+            for p in sorted(self.local_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold())):
+                entries.append((p.name, p.is_dir(), p.stat().st_size, str(p)))
+            self.fill(self.local_tree, entries); self.local_display.setText(str(self.local_path))
+        except OSError: self.status.setText('Cannot read local directory')
+    @staticmethod
+    def fill(tree, entries):
+        tree.clear()
+        for name, directory, size, path in entries:
+            item = QTreeWidgetItem([name, '<DIR>' if directory else str(size)])
+            item.setData(0, Qt.ItemDataRole.UserRole, (path, directory))
+            tree.addTopLevelItem(item)
     def refresh_remote(self):
-        if not self.client.conn:return
-        path=self.remote_path
-        self.work(lambda:self.events.put(('remote',path,self.client.listdir(path))))
-    def go_path(self,side):
-        if side=='local':
-            p=Path(self.local_display.get()).expanduser()
-            if p.is_dir():self.local_path=p;self.refresh_local()
-            else:self.log('Not a local directory: '+str(p))
-        else:
-            self.remote_path=self.remote_display.get();self.refresh_remote()
-    def open_item(self,side):
-        if side=='local':
-            selected=self.local_tree.selection()
-            if not selected:return
-            iid=selected[0]
-            p=self.local_path.parent if iid=='..' else Path(self.local_tree.item(iid,'tags')[0])
-            if p.is_dir():self.local_path=p;self.refresh_local()
-        else:
-            selected=self.remote_tree.selection()
-            if not selected:return
-            iid=selected[0]
-            if iid=='..':self.remote_path=os.path.dirname(self.remote_path.rstrip('/')) or '/'
-            else:
-                name,isdir=self.entries[iid]
-                if not isdir:return
-                self.remote_path=self.remote_path.rstrip('/')+'/'+name
-            self.refresh_remote()
-    def transfer(self,direction):
-        if not self.client.conn:self.log('Connect to a server first.');return
-        if direction=='upload':
-            selection=self.local_tree.selection()
-            if not selection or selection[0]=='..':return
-            source=Path(self.local_tree.item(selection[0],'tags')[0])
-            if not source.is_file():self.log('Select a file, not a directory.');return
-            dest=self.remote_path.rstrip('/')+'/'+source.name;size=source.stat().st_size
-        else:
-            selection=self.remote_tree.selection()
-            if not selection or selection[0]=='..':return
-            name,isdir=self.entries[selection[0]]
-            if isdir:self.log('Select a file, not a directory.');return
-            source=self.remote_path.rstrip('/')+'/'+name;dest=self.local_path/name;size=0
-            if dest.exists() and not messagebox.askyesno('Overwrite file?',f'{dest} exists. Overwrite it?'):return
-        self.progress['value']=0
-        def callback(done,total):
-            denom=total or size
-            if denom:self.events.put(('progress',min(100,done/denom*100)))
-        def job():
-            self.events.put(('log',direction.upper()+' '+str(source)))
-            if direction=='upload':self.client.upload(str(source),str(dest),callback)
-            else:self.client.download(str(source),str(dest),callback)
-            self.events.put(('progress',100));self.events.put(('log','Completed: '+str(dest)))
-            if direction=='upload':self.events.put(('remote',self.remote_path,self.client.listdir(self.remote_path)))
-            else:self.events.put(('local_refresh',))
-        self.work(job)
-    def upload(self):self.transfer('upload')
-    def download(self):self.transfer('download')
+        if not self.connected: return
+        path = self.remote_display.text() or '/'
+        def done(entries):
+            self.remote_path = path
+            rows = [('..', True, 0, posixpath.dirname(path.rstrip('/')) or '/')]
+            rows += [(n, d, s, posixpath.join(path, n)) for n, d, s in entries]
+            self.fill(self.remote_tree, rows)
+        self.submit(lambda: self.client.listdir(path), done)
+    def navigate(self, side):
+        if side == 'local': self.local_path = Path(self.local_display.text()).expanduser(); self.refresh_local()
+        else: self.refresh_remote()
+    def open_item(self, side, item):
+        path, directory = item.data(0, Qt.ItemDataRole.UserRole)
+        if directory:
+            getattr(self, side + '_display').setText(path); self.navigate(side)
+    def enqueue_transfer(self, direction, source, dest):
+        if not self.connected: self.status.setText('Connect to a server first'); return
+        resume = self.resume.isChecked()
+        row = self.transfers.topLevelItemCount()
+        self.transfers.addTopLevelItem(QTreeWidgetItem([direction + ': ' + Path(source).name, 'Queued']))
+        def progress(done, total):
+            self.events.put(('state', row, f'{done * 100 // total}%' if total else f'{done} bytes'))
+        method = self.client.upload if direction == 'Upload' else self.client.download
+        def completed(_):
+            self.refresh_local() if direction == 'Download' else self.refresh_remote()
+            self.logger.info(json.dumps({'event': 'transfer_completed', 'direction': direction}))
+        self.submit(lambda: method(str(source), str(dest), progress, resume=resume), completed, row)
+    def upload_paths(self, paths):
+        for path in paths:
+            if path.is_file():
+                # Explicit overwrite consent also applies to files dropped from Explorer.
+                if not self.resume.isChecked() and QMessageBox.question(self, 'Upload file', 'Upload this file? An existing remote file with this name will be replaced.\n' + path.name) != QMessageBox.StandardButton.Yes: continue
+                self.enqueue_transfer('Upload', str(path), posixpath.join(self.remote_path, path.name))
+    def upload_selected(self):
+        self.upload_paths([Path(i.data(0, Qt.ItemDataRole.UserRole)[0]) for i in self.local_tree.selectedItems() if not i.data(0, Qt.ItemDataRole.UserRole)[1]])
+    def download_selected(self):
+        for item in self.remote_tree.selectedItems():
+            source, directory = item.data(0, Qt.ItemDataRole.UserRole)
+            if directory: continue
+            name = posixpath.basename(source)
+            if name in ('.', '..') or '/' in name or '\\' in name or ':' in name:
+                self.status.setText('Unsafe remote filename'); continue
+            dest = self.local_path / name
+            if dest.exists() and not self.resume.isChecked() and QMessageBox.question(self, 'Replace file', 'Replace ' + name + '?') != QMessageBox.StandardButton.Yes: continue
+            self.enqueue_transfer('Download', source, str(dest))
+    def server_book(self):
+        dialog = ServerBook(self); dialog.exec()
 
-if __name__=='__main__':
-    app=App()
-    app.mainloop()
+
+class ServerBook(QDialog):
+    def __init__(self, session):
+        super().__init__(session)
+        self.session = session
+        self.setWindowTitle('Server Book'); self.resize(750, 400)
+        layout = QVBoxLayout(self)
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels(['Profile', 'Protocol', 'Host']); layout.addWidget(self.tree)
+        try: self.profiles = load_profiles()
+        except Exception as exc:
+            QMessageBox.warning(self, 'Server Book', 'Could not load profiles: ' + type(exc).__name__)
+            self.profiles = []; self.setEnabled(False)
+        bar = QHBoxLayout(); layout.addLayout(bar)
+        for name, action in [('New', lambda: self.edit()), ('Edit', self.edit_selected), ('Delete', self.remove), ('Load', self.load)]:
+            button = QPushButton(name); button.clicked.connect(action); bar.addWidget(button)
+        self.redraw()
+    def redraw(self):
+        self.tree.clear()
+        for p in self.profiles: self.tree.addTopLevelItem(QTreeWidgetItem([p['name'], p['protocol'], p['host']]))
+    def index(self):
+        item = self.tree.currentItem()
+        return self.tree.indexOfTopLevelItem(item) if item else None
+    def edit_selected(self):
+        index = self.index()
+        if index is not None: self.edit(index)
+    def edit(self, index=None):
+        old = self.profiles[index] if index is not None else {}
+        dialog = QDialog(self); dialog.setWindowTitle('Connection profile')
+        layout = QFormLayout(dialog); fields = {}
+        defaults = {'name': '', 'host': self.session.host.text(), 'port': self.session.port.text(), 'username': self.session.user.text(), 'local_path': str(self.session.local_path), 'remote_path': self.session.remote_path}
+        for key in defaults:
+            field = QLineEdit(str(old.get(key, defaults[key]))); layout.addRow(key.replace('_', ' ').title(), field); fields[key] = field
+        protocol = QComboBox(); protocol.addItems(['SFTP', 'FTPS', 'FTP']); protocol.setCurrentText(old.get('protocol', self.session.protocol.currentText())); layout.addRow('Protocol', protocol)
+        password = QLineEdit(); password.setEchoMode(QLineEdit.EchoMode.Password); layout.addRow('Password (blank keeps saved)', password)
+        mode = QComboBox(); mode.addItems(['Do not save', 'Windows Credential Manager', 'Encrypted profile (DPAPI)'])
+        mode.setCurrentIndex(1 if old.get('credential') else 2 if old.get('password_dpapi') else 0); layout.addRow('Password storage', mode)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(dialog.reject); layout.addRow(buttons)
+        def save():
+            try:
+                item = {key: field.text().strip() for key, field in fields.items()}
+                item.update(port=int(item['port']), protocol=protocol.currentText(), id=str(uuid.uuid4()))
+                from server_book import validate_profiles
+                updated = list(self.profiles)
+                if index is None: updated.append(item)
+                else: updated[index] = item
+                validate_profiles(updated)
+                secret = password.text() or (profile_password(old) if mode.currentIndex() else '')
+                if mode.currentIndex() == 1:
+                    windows_vault().set_password('AetherFTP/' + item['id'], 'password', secret); item['credential'] = 'windows'
+                elif mode.currentIndex() == 2 and secret: item['password_dpapi'] = encrypt_password(secret)
+                try:
+                    save_profiles(updated)
+                except Exception:
+                    if item.get('credential'):
+                        windows_vault().delete_password('AetherFTP/' + item['id'], 'password')
+                    raise
+                self.profiles = updated; self.redraw(); dialog.accept()
+                if old.get('credential'):
+                    try: windows_vault().delete_password('AetherFTP/' + old['id'], 'password')
+                    except Exception:
+                        QMessageBox.warning(self, 'Credential cleanup', 'Profile saved, but the previous credential could not be removed from Windows Credential Manager.')
+            except Exception as exc: QMessageBox.warning(dialog, 'Profile not saved', 'Check profile fields and credential availability: ' + type(exc).__name__)
+        buttons.accepted.connect(save); dialog.exec()
+    def remove(self):
+        index = self.index()
+        if index is None or QMessageBox.question(self, 'Delete profile', 'Delete the selected profile and saved credential?') != QMessageBox.StandardButton.Yes: return
+        try:
+            profile = self.profiles[index]
+            if profile.get('credential'): windows_vault().delete_password('AetherFTP/' + profile['id'], 'password')
+            updated = self.profiles[:index] + self.profiles[index + 1:]; save_profiles(updated); self.profiles = updated; self.redraw()
+        except Exception as exc: QMessageBox.warning(self, 'Delete failed', type(exc).__name__)
+    def load(self):
+        index = self.index()
+        if index is None: return
+        p = self.profiles[index]; s = self.session
+        if s.pending or s.connected:
+            QMessageBox.warning(self, 'Session active', 'Disconnect and finish queued work before loading a profile.'); return
+        try: secret = profile_password(p)
+        except Exception as exc: QMessageBox.warning(self, 'Credential unavailable', type(exc).__name__); return
+        s.protocol.setCurrentText(p['protocol'])
+        for widget, value in [(s.host,p['host']), (s.port,str(p['port'])), (s.user,p['username']), (s.password,secret), (s.local_display,p.get('local_path',str(Path.home()))), (s.remote_display,p.get('remote_path','/'))]: widget.setText(value)
+        s.navigate('local'); self.accept()
+
+
+class App(QMainWindow):
+    def __init__(self, logger):
+        super().__init__(); self.logger = logger
+        self.setWindowTitle('AetherFTP ' + __version__); self.resize(1180, 900)
+        root = QWidget(); layout = QVBoxLayout(root); self.setCentralWidget(root)
+        brand = QLabel('◈ AETHER / FTP'); brand.setObjectName('brand'); layout.addWidget(brand)
+        layout.addWidget(QLabel('Engineering File Transfer • Built by Anon0ne'))
+        button = QPushButton('New connection tab'); button.clicked.connect(self.add_tab); layout.addWidget(button)
+        self.tabs = QTabWidget(); self.tabs.setTabsClosable(True); self.tabs.tabCloseRequested.connect(self.close_tab); layout.addWidget(self.tabs)
+        self.add_tab()
+    def add_tab(self):
+        self.tabs.setCurrentIndex(self.tabs.addTab(Session(self.logger), 'Connection ' + str(self.tabs.count() + 1)))
+    def close_tab(self, index):
+        session = self.tabs.widget(index)
+        if session.pending:
+            QMessageBox.warning(self, 'Queue active', 'Wait for queued operations before closing this tab.'); return
+        session.timer.stop(); session.jobs.put(None); session.worker.join(timeout=1)
+        self.tabs.removeTab(index); session.deleteLater()
+    def closeEvent(self, event):
+        if any(self.tabs.widget(i).pending for i in range(self.tabs.count())):
+            QMessageBox.warning(self, 'Queue active', 'Wait for queued operations before exiting.'); event.ignore(); return
+        while self.tabs.count(): self.close_tab(0)
+        event.accept()
+
+
+def main():
+    app = QApplication(sys.argv); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
+    logger = configure_logging()
+    def exception_hook(kind, value, traceback):
+        logger.error(json.dumps({'event': 'unhandled_exception', 'error_type': kind.__name__}))
+        QMessageBox.critical(None, 'AetherFTP error', 'An unexpected error occurred: ' + kind.__name__)
+    sys.excepthook = exception_hook
+    window = App(logger); window.show()
+    if '--smoke-test' in sys.argv: QTimer.singleShot(500, window.close)
+    return app.exec()
+
+
+if __name__ == '__main__': sys.exit(main())

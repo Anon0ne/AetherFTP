@@ -8,3 +8,12 @@ dist/
 .env
 *.log
 servers.json
+
+.pytest_cache/
+.test-tmp*/
+.smoke-data/
+*.pem
+*.key
+*.pfx
+*.p12
+.env.*

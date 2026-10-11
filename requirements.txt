@@ -1,2 +1,5 @@
-paramiko>=3.4,<5
+PySide6==6.8.3
+paramiko>=3.4,<6
+keyring>=25,<26
 pyinstaller>=6.0,<7
+pytest>=8,<10

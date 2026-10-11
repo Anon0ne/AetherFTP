@@ -27,11 +27,16 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed.' }
     & $venvPython -m pip install -r requirements.txt
     if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+    & $venvPython -m pytest -q
+    if ($LASTEXITCODE -ne 0) { throw 'Automated tests failed; build stopped.' }
     Write-Host 'Building Windows EXE...'
     & $venvPython -m PyInstaller --noconfirm --clean --onefile --windowed --name AetherFTP --paths $PSScriptRoot aetherftp.py
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
     $exe = Join-Path $PSScriptRoot 'dist\AetherFTP.exe'
     if (-not (Test-Path $exe)) { throw 'EXE was not created.' }
+    $check = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -WindowStyle Hidden -PassThru
+    if (-not $check.WaitForExit(30000)) { $check.Kill(); throw 'Packaged startup timed out.' }
+    if ($check.ExitCode -ne 0) { throw 'Packaged startup failed.' }
     $shell = New-Object -ComObject WScript.Shell
     foreach ($linkPath in @((Join-Path ([Environment]::GetFolderPath('Desktop')) 'AetherFTP.lnk'), (Join-Path $env:USERPROFILE 'AetherFTP.lnk'))) {
         $shortcut = $shell.CreateShortcut($linkPath)
