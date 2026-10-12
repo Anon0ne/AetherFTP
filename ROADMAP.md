@@ -19,7 +19,8 @@ Filename filters, paired bookmarks, synchronized browsing, Notepad remote editin
 ## File management
 
 - Color-coded directory comparison by size/date, with a preview before transferring changed files.
-- Recursive remote search and local text search beyond the implemented glob filters.
+- Remote Search button above the server pane: filename/glob search in the current directory, optional subfolders, background traversal, Stop support and scanned-folder counts. Results show full path, size and modified time, with open-folder, download and edit actions. Start with the existing browsing connection to avoid additional server login pressure.
+- Local text search beyond the implemented glob filters.
 - Remote rename, delete and permission controls, with confirmations for destructive operations (mkdir is implemented).
 - Configurable external editors beyond the implemented Notepad workflow.
 
