@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.1 — 2026-10-12
+## 0.1.0b - 2026-10-12
+
+First public beta. Earlier 0.3-0.6 versions below were local development milestones.
 
 - Add a draggable divider for the Queue/Event Log panel, capped at 35% of the file workspace height.
 - Retain the chosen height when collapsing and reopening transfer activity.
