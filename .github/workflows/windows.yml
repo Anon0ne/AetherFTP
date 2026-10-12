@@ -16,7 +16,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m pytest -q
       - run: python aetherftp.py --smoke-test
-      - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name AetherFTP aetherftp.py
+      - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name AetherFTP --icon assets/aetherftp.ico --add-data "assets/aetherftp.ico;assets" aetherftp.py
       - name: Verify packaged startup
         shell: pwsh
         run: |

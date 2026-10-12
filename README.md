@@ -1,9 +1,11 @@
-# AetherFTP 0.1.0b
+# AetherFTP 0.1.1b
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
 
 ## Install and launch
+
+Download the Windows ZIP from [GitHub Releases](https://github.com/Anon0ne/AetherFTP/releases), extract it into a permanent folder, and run **AetherFTP.exe**. Run **Create_Desktop_Shortcut.bat** to add an AetherFTP shortcut to your Windows Desktop with the new purple/cyan icon. Keep the extracted folder in place so the shortcut continues to work.
 
 Run **Install_AetherFTP.bat** to create a Python environment, install dependencies, run tests, and build `dist\AetherFTP.exe`. Run **Launch_AetherFTP.bat** to launch. Python 3.10+ is supported; the installer can install Python 3.12 through winget. Initial setup requires internet access.
 
@@ -34,7 +36,7 @@ Never commit profiles, passwords, tokens, private keys or generated builds. Use 
 
 ## Validation limits
 
-Protocol behavior is covered by isolated adapter tests. Real-server interoperability, disconnect recovery, and visual checks at enlarged system fonts require additional testing before a public release. See `CHANGELOG.md` for version history.
+Protocol behavior is covered by isolated adapter tests. Automated tests isolate protocol adapters; broader real-server interoperability, disconnect recovery, and enlarged-font checks remain ongoing. See `CHANGELOG.md` for version history.
 
 ## Transfer progress and timing
 
@@ -76,17 +78,17 @@ Transfer connections are reused during active batches and closed when the queue 
 
 See [ROADMAP.md](ROADMAP.md) for proposed features.
 
-## Next-release development
+## Filename filters
 
-On the next-release branch, **Menu → Filename filters** sets include/exclude glob patterns for the current tab. Separate patterns with semicolons. For example, include `*.txt; *.zip`, or exclude `build; __pycache__; *.pyc`. Matching is case-insensitive. Both file panes hide excluded entries, and recursive upload planning prunes excluded folders and files. Include patterns select files while keeping directories navigable; exclusion rules can also hide/prune directories. Filters reset when the tab is closed. The published 0.1.0b executable does not include these development features.
+**Menu → Filename filters** sets include/exclude glob patterns for the current tab. Separate patterns with semicolons. For example, include `*.txt; *.zip`, or exclude `build; __pycache__; *.pyc`. Matching is case-insensitive. Both file panes hide excluded entries, and recursive upload planning prunes excluded folders and files. Include patterns select files while keeping directories navigable; exclusion rules can also hide/prune directories. Filters reset when the tab is closed.
 
-## Paired bookmarks and synchronized browsing (development)
+## Paired bookmarks and synchronized browsing
 
 Connect, choose your local and remote folders, then open **Menu → Paired bookmarks** to save the pair under a name. Bookmarks are scoped to server/protocol/username and stored privately in `%APPDATA%\AetherFTP\bookmarks.json`; passwords are never stored in bookmarks. Open restores both paths after the remote listing succeeds; Delete removes a bookmark.
 
 Enable **Menu → Synchronized browsing** at the current folder pair. Navigating either pane maps the relative path to the other pane. The matching local folder must exist and the remote listing must succeed before both panes change. Navigation outside the root pair is rejected; disable synchronization to choose new roots. Opening a bookmark while synchronized replaces the root pair. This feature navigates folders; it does not copy or delete files.
 
-## Remote editing (development)
+## Remote editing
 
 Select one remote file and choose **Menu → Edit selected remote file**. AetherFTP downloads a temporary local copy through the transfer queue, then opens it explicitly in Windows Notepad. Saving the file triggers an upload confirmation once the tab is idle. Declining leaves the local copy available; **Menu → Remote editing sessions → Upload changes** retries manually. Reopen editor opens the same local copy.
 
@@ -97,3 +99,11 @@ Close Notepad and use **Remote editing sessions → Stop editing** to discard th
 ## Windows compatibility folders
 
 AetherFTP resolves the current Windows user's `My Documents` compatibility junction to its actual target when browsing locally, including typed paths and bookmarked paths. The local path box shows the destination after opening it. Windows access controls remain unchanged, and permission errors on the destination are still respected. Recursive uploads continue to skip links/junctions; open the destination and select its real files/folders to transfer them.
+
+## Remote right-click actions
+
+Right-click in the server pane while connected to create a **New file** (empty), create a **New folder**, or **Refresh**. Right-click one selected file and choose **Edit in Notepad** to use the confirmed remote-editing workflow. New names cannot contain path separators or Windows-reserved characters. New SFTP files use exclusive creation; FTP creation checks the server listing first and rejects existing names. FTP does not provide an atomic exclusive-create operation, so avoid simultaneous creation of the same filename by other clients.
+
+## Application icon
+
+The approved folder/server artwork and opposing transfer arrows use AetherFTP's purple/cyan palette. Source artwork, Windows ICO sizes and the design prompt are in `assets/`. `tools/build_icon.py` converts the PNG to a multi-size ICO using Qt. BAT installation and GitHub Actions embed the icon and package it for the window/taskbar.

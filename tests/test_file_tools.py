@@ -170,3 +170,47 @@ def test_editor_save_requires_confirmation_and_keeps_copy_on_decline(tmp_path,mo
         assert calls==[edit] and not session.edit_prompt_active
     finally:
         edit.close(); session.edits=[]; session.timer.stop(); session.edit_timer.stop(); session.jobs.put(None); session.worker.join(1)
+
+def test_new_remote_file_refuses_existing_ftp_file():
+    client=MemoryClient(); client.kind='FTPES'; client.listdir=Mock(return_value=[('existing.txt',False,8)])
+    with pytest.raises(FileExistsError): tools.create_remote_file(client,'unused','/files/existing.txt',Mock())
+    assert client.uploads == []
+
+
+def test_new_sftp_file_uses_exclusive_creation():
+    from unittest.mock import MagicMock
+    client=Mock(); client.kind='SFTP'; client.conn.open=MagicMock()
+    progress=Mock()
+    tools.create_remote_file(client,'unused','/files/new.txt',progress)
+    client.conn.open.assert_called_once_with('/files/new.txt','wx')
+    client.upload.assert_not_called(); progress.assert_called_once_with(0,0)
+
+
+@pytest.mark.parametrize('name',['../escape','bad/name','bad\\name','..','CON','bad?.txt','bad\nname'])
+def test_new_remote_name_validation(name):
+    with pytest.raises(ValueError): tools.validate_remote_name(name)
+
+@pytest.mark.parametrize('directory',[False,True])
+def test_remote_right_click_offers_creation_and_file_editing(monkeypatch,directory):
+    os.environ['QT_QPA_PLATFORM']='offscreen'
+    from PySide6.QtWidgets import QApplication,QMenu
+    from PySide6.QtCore import QPoint,QTimer
+    from aetherftp import Session
+    app=QApplication.instance() or QApplication([])
+    session=Session(logging.getLogger('remote-context')); session.connected=True
+    session.fill(session.remote_tree,[('item',directory,0,'/item')])
+    session.remote_tree.topLevelItem(0).setSelected(True)
+    actions=[]
+    def inspect_and_close():
+        for menu in QApplication.topLevelWidgets():
+            if isinstance(menu,QMenu) and menu.isVisible():
+                actions.extend((a.text(),a.isEnabled()) for a in menu.actions() if a.text())
+                menu.close()
+    QTimer.singleShot(0,inspect_and_close)
+    QTimer.singleShot(1000,inspect_and_close)
+    try:
+        session.remote_context_menu(QPoint(0,0))
+        assert ('Edit in Notepad',not directory) in actions
+        assert ('New file…',True) in actions and ('New folder…',True) in actions
+    finally:
+        session.timer.stop();session.edit_timer.stop();session.jobs.put(None);session.worker.join(1)

@@ -30,20 +30,14 @@ try {
     & $venvPython -m pytest -q
     if ($LASTEXITCODE -ne 0) { throw 'Automated tests failed; build stopped.' }
     Write-Host 'Building Windows EXE...'
-    & $venvPython -m PyInstaller --noconfirm --clean --onefile --windowed --name AetherFTP --paths $PSScriptRoot aetherftp.py
+    & $venvPython -m PyInstaller --noconfirm --clean --onefile --windowed --name AetherFTP --icon assets/aetherftp.ico --add-data 'assets/aetherftp.ico;assets' --paths $PSScriptRoot aetherftp.py
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
     $exe = Join-Path $PSScriptRoot 'dist\AetherFTP.exe'
     if (-not (Test-Path $exe)) { throw 'EXE was not created.' }
     $check = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -WindowStyle Hidden -PassThru
     if (-not $check.WaitForExit(30000)) { $check.Kill(); throw 'Packaged startup timed out.' }
     if ($check.ExitCode -ne 0) { throw 'Packaged startup failed.' }
-    $shell = New-Object -ComObject WScript.Shell
-    foreach ($linkPath in @((Join-Path ([Environment]::GetFolderPath('Desktop')) 'AetherFTP.lnk'), (Join-Path $env:USERPROFILE 'AetherFTP.lnk'))) {
-        $shortcut = $shell.CreateShortcut($linkPath)
-        $shortcut.TargetPath = $exe
-        $shortcut.WorkingDirectory = Split-Path $exe
-        $shortcut.Save()
-    }
+    & (Join-Path $PSScriptRoot 'create_shortcut.ps1') -ExePath $exe -HomeShortcut
     Write-Host "SUCCESS: $exe"
     Write-Host 'Desktop and user-home shortcuts created.'
     exit 0

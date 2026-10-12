@@ -23,3 +23,7 @@ Source history uses Justin Funderburk's supplied author identity. Product builde
 ## v0.6.1 verification
 
 55 automated tests cover the adjustable activity height cap, idle worker connection cleanup, bounded TLS listing recovery and safe queue clearing. Product builder credit remains Anon0ne. See ROADMAP.md for proposed features.
+
+## 0.1.1b verification
+
+87 tests cover the released file tools, remote creation safeguards, real Qt context-menu actions, private bookmarks, synchronization, edit conflict checks, compatibility-folder navigation and icon resources. Standard ICO sizes are 16, 24, 32, 48, 64, 128 and 256 pixels. Windows CI verifies source startup and the packaged icon-bearing application before publication. PowerShell installer and shortcut scripts pass syntax validation.

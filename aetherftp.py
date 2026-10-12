@@ -9,6 +9,7 @@ import queue
 import sys
 import ssl
 import subprocess
+import tempfile
 import threading
 import uuid
 import time
@@ -17,7 +18,7 @@ from itertools import chain
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QTimer, QMimeData, QUrl
-from PySide6.QtGui import QDrag
+from PySide6.QtGui import QDrag, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTabWidget,
     QSplitter, QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
@@ -34,8 +35,10 @@ from upload_plan import plan_uploads
 from transfer_pool import TransferPool
 from user_settings import DEFAULTS, load_settings, save_settings
 from file_filters import FileFilter
-from file_tools import load_bookmarks, save_bookmarks, server_scope, paired_paths, RemoteEdit
+from file_tools import (load_bookmarks, save_bookmarks, server_scope, paired_paths,
+                        RemoteEdit, validate_remote_name, create_remote_file)
 from local_files import read_directory, navigation_path
+from app_assets import icon_path, set_windows_identity
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -248,6 +251,8 @@ class Session(QWidget):
         self.queue_timer = QTimer(self); self.queue_timer.setInterval(10)
         self.queue_timer.timeout.connect(self.dispatch_upload_batch)
         self.refresh_local()
+        self.remote_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.remote_tree.customContextMenuRequested.connect(self.remote_context_menu)
         self.edit_timer = QTimer(self); self.edit_timer.setInterval(1000)
         self.edit_timer.timeout.connect(self.check_edit_changes); self.edit_timer.start()
     def toggle_activity(self, visible):
@@ -614,6 +619,43 @@ class Session(QWidget):
         self.enqueue_transfer('Download', remote, str(edit.path), resume_override=False, refresh=False,
                               transfer_override=download, on_success=opened, on_finished=finished)
 
+    def remote_context_menu(self, position):
+        item = self.remote_tree.itemAt(position)
+        if item and not item.isSelected():
+            self.remote_tree.clearSelection(); item.setSelected(True)
+        menu = QMenu(self.remote_tree)
+        edit = menu.addAction('Edit in Notepad', self.edit_remote_file)
+        selected = self.remote_tree.selectedItems()
+        edit.setEnabled(self.connected and len(selected) == 1 and
+                        not selected[0].data(0, Qt.ItemDataRole.UserRole)[1])
+        menu.addSeparator()
+        menu.addAction('New file…', lambda: self.create_remote_item(False)).setEnabled(self.connected)
+        menu.addAction('New folder…', lambda: self.create_remote_item(True)).setEnabled(self.connected)
+        menu.addSeparator()
+        menu.addAction('Refresh', self.refresh_remote).setEnabled(self.connected)
+        menu.exec(self.remote_tree.viewport().mapToGlobal(position))
+        menu.deleteLater()
+
+    def create_remote_item(self, directory=False):
+        if not self.connected: self.status.setText('Connect before creating remote items'); return
+        name, ok = QInputDialog.getText(self, 'New remote folder' if directory else 'New remote file',
+                                       'Name (in ' + self.remote_path + ')')
+        if not ok: return
+        try: name = validate_remote_name(name.strip())
+        except ValueError as error: QMessageBox.warning(self, 'Invalid name', str(error)); return
+        destination = posixpath.join(self.remote_path, name)
+        if directory:
+            self.submit(lambda: self.client.ensure_directory(destination), lambda _: self.refresh_remote(),
+                        operation='Create remote folder')
+            return
+        folder = STORE.parent / 'creation'; folder.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(prefix='aetherftp-new-', dir=folder)
+        source = Path(temporary.name) / name; source.touch()
+        def create(client, progress):
+            create_remote_file(client, str(source), destination, progress)
+        self.enqueue_transfer('Upload', str(source), destination, resume_override=False,
+                              transfer_override=create, on_finished=temporary.cleanup)
+
     def check_edit_changes(self):
         if self.pending or not self.connected or self.edit_prompt_active or QApplication.activeModalWidget(): return
         for edit in self.edits:
@@ -876,6 +918,7 @@ class SettingsDialog(QDialog):
 class App(QMainWindow):
     def __init__(self, logger):
         super().__init__(); self.logger = logger
+        self.setWindowIcon(QIcon(str(icon_path())))
         self.settings = load_settings()
         self.transfer_pool = TransferPool(Client, lambda client, ensure, job: job[0].run_transfer_job(client, ensure, job[1:]))
         self.transfer_pool.configure(self.settings)
@@ -924,14 +967,19 @@ class App(QMainWindow):
 
 
 def main():
+    set_windows_identity()
     app = QApplication(sys.argv); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
+    app.setWindowIcon(QIcon(str(icon_path())))
     logger = configure_logging()
     def exception_hook(kind, value, traceback):
         logger.error(json.dumps({'event': 'unhandled_exception', 'error_type': kind.__name__}))
         QMessageBox.critical(None, 'AetherFTP error', 'An unexpected error occurred: ' + kind.__name__)
     sys.excepthook = exception_hook
     window = App(logger); window.show()
-    if '--smoke-test' in sys.argv: QTimer.singleShot(500, window.close)
+    if '--smoke-test' in sys.argv:
+        if window.windowIcon().isNull():
+            window.close(); return 1
+        QTimer.singleShot(500, window.close)
     return app.exec()
 
 

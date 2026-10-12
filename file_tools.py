@@ -11,6 +11,26 @@ from server_book import STORE
 BOOKMARKS = STORE.parent / 'bookmarks.json'
 
 
+def validate_remote_name(name):
+    if not name or name in ('.', '..') or name.endswith((' ', '.')) or Path(name).is_reserved() or any(
+            c in name for c in '<>:"/\\|?*') or any(ord(c) < 32 for c in name):
+        raise ValueError('Enter a valid filename without path separators or reserved characters')
+    return name
+
+
+def create_remote_file(client, local, remote, progress):
+    if client.kind == 'SFTP':
+        # Exclusive creation prevents replacing another user's existing file.
+        with client.conn.open(remote, 'wx'):
+            pass
+        progress(0, 0)
+    else:
+        name = posixpath.basename(remote)
+        if any(entry[0].casefold() == name.casefold() for entry in client.listdir(posixpath.dirname(remote) or '/')):
+            raise FileExistsError('A file or folder with that name already exists')
+        client.upload(local, remote, progress, resume=False)
+
+
 def server_scope(args):
     host, port, user, _password, protocol = args
     return hashlib.sha256(json.dumps([host.casefold(), port, user, protocol]).encode()).hexdigest()

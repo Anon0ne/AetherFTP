@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.1b - 2026-10-12
+
+- Add a purple/cyan FTP icon to Windows executables, application windows and Desktop shortcuts.
+- Include a Desktop shortcut helper in release packages and use the custom icon in BAT installation builds.
+- Add remote-pane right-click actions for editing in Notepad, creating files/folders and refreshing.
+- Protect new SFTP files with exclusive creation; check for existing names before FTP file creation.
 
 - Resolve the current user's legacy My Documents junction to its real target for local navigation, without changing filesystem permissions.
 

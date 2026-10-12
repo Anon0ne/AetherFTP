@@ -4,11 +4,9 @@ Project builder: **Anon0ne**.
 
 This is a proposal, not a list of implemented features. FileZilla's documented client features include bookmarks, filename filters, directory comparison, synchronized browsing, remote search and remote editing, alongside its protocol and queue features. References: https://filezilla-project.org/client_features.php and the project author's source README at https://github.com/botg/FileZilla3/blob/master/README.
 
-## Next release: file navigation and editing
+## Delivered in 0.1.1b
 
-Start after publishing 0.1.0b: filename filters, paired local/remote bookmarks and synchronized browsing, followed by remote editing with change detection and explicit re-upload confirmation.
-
-Work implemented on `codex/next-release-file-tools`: filename filters, paired bookmarks, synchronized browsing and Notepad remote editing with confirmed uploads and conflict checks. This work is not included in the published 0.1.0b executable. It is undergoing development validation for the next release.
+Filename filters, paired bookmarks, synchronized browsing, Notepad remote editing with confirmed uploads and conflict checks, remote right-click file/folder creation, Windows compatibility-folder fixes, a distinct application icon, and Desktop shortcut support.
 
 ## Reliable queue control
 
@@ -20,11 +18,10 @@ Work implemented on `codex/next-release-file-tools`: filename filters, paired bo
 
 ## File management
 
-- Bookmarks for paired local/remote paths and optional synchronized browsing.
 - Color-coded directory comparison by size/date, with a preview before transferring changed files.
-- Local and remote search, filename filters, and include/exclude rules for folder batches.
-- Remote rename, delete, mkdir and permission controls, with confirmations for destructive operations.
-- Open remote files in an external editor, detect edits and confirm re-upload with conflict checks.
+- Recursive remote search and local text search beyond the implemented glob filters.
+- Remote rename, delete and permission controls, with confirmations for destructive operations (mkdir is implemented).
+- Configurable external editors beyond the implemented Notepad workflow.
 
 ## AetherFTP additions
 
