@@ -4,7 +4,11 @@ Project builder: **Anon0ne**.
 
 This is a proposal, not a list of implemented features. FileZilla's documented client features include bookmarks, filename filters, directory comparison, synchronized browsing, remote search and remote editing, alongside its protocol and queue features. References: https://filezilla-project.org/client_features.php and the project author's source README at https://github.com/botg/FileZilla3/blob/master/README.
 
-## Next milestone: reliable queue control
+## Next release: file navigation and editing
+
+Start after publishing 0.1.0b: filename filters, paired local/remote bookmarks and synchronized browsing, followed by remote editing with change detection and explicit re-upload confirmation.
+
+## Reliable queue control
 
 1. Pause, cancel and retry individual transfers or whole batches, with explicit partial-file handling.
 2. Save pending queues between launches, without saving credentials in the queue; require reconnection before recovery.

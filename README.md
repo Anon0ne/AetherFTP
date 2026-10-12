@@ -1,4 +1,4 @@
-# AetherFTP 0.6.1
+# AetherFTP 0.1.0b
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
