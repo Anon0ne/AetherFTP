@@ -35,6 +35,7 @@ from transfer_pool import TransferPool
 from user_settings import DEFAULTS, load_settings, save_settings
 from file_filters import FileFilter
 from file_tools import load_bookmarks, save_bookmarks, server_scope, paired_paths, RemoteEdit
+from local_files import read_directory
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -396,13 +397,23 @@ class Session(QWidget):
         def close_connections():
             self.client.close(); self.transfer_pool.close_idle_connections()
         self.submit(close_connections, lambda _: self.status.setText('OFFLINE'), operation='Disconnect')
-    def refresh_local(self):
+    def refresh_local(self, target=None):
+        candidate = Path(target or self.local_path).expanduser()
         try:
-            entries = [('..', True, 0, str(self.local_path.parent))]
-            for p in sorted(self.local_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold())):
-                entries.append((p.name, p.is_dir(), p.stat().st_size, str(p)))
-            self.fill(self.local_tree, entries); self.local_display.setText(str(self.local_path))
-        except OSError: self.status.setText('Cannot read local directory')
+            entries, skipped = read_directory(candidate)
+        except OSError as error:
+            self.local_display.setText(str(self.local_path))
+            self.status.setText('Cannot read local directory: ' + type(error).__name__)
+            return False
+        self.show_local_directory(candidate, entries, skipped)
+        return True
+
+    def show_local_directory(self, path, entries, skipped):
+        self.local_path = path
+        self.fill(self.local_tree, entries); self.local_display.setText(str(path))
+        if skipped:
+            message = f'Local directory: skipped {skipped} unreadable or missing entries'
+            self.status.setText(message); self.log.appendPlainText(message)
     def fill(self, tree, entries):
         tree.clear()
         for name, directory, size, path in entries:
@@ -444,14 +455,15 @@ class Session(QWidget):
             try:
                 local, remote = paired_paths(*self.sync_roots, side, getattr(self, side + '_display').text())
                 if not local.is_dir(): raise ValueError('Matching local folder does not exist')
+                entries, skipped = read_directory(local)
             except (ValueError, OSError) as error:
                 self.status.setText(str(error)); self.local_display.setText(str(self.local_path)); self.remote_display.setText(self.remote_path); return
             self.local_display.setText(str(self.local_path)); self.remote_display.setText(self.remote_path)
             def paired():
-                self.local_path = local; self.refresh_local()
+                self.show_local_directory(local, entries, skipped)
             self.refresh_remote(remote, paired)
             return
-        if side == 'local': self.local_path = Path(self.local_display.text()).expanduser(); self.refresh_local()
+        if side == 'local': self.refresh_local(self.local_display.text())
         else: self.refresh_remote()
     def open_item(self, side, item):
         path, directory = item.data(0, Qt.ItemDataRole.UserRole)
@@ -551,8 +563,10 @@ class Session(QWidget):
             if not record: return
             local = Path(record['local'])
             if not local.is_dir(): QMessageBox.warning(dialog, 'Bookmark unavailable', 'Local folder no longer exists.'); return
+            try: entries, skipped = read_directory(local)
+            except OSError as error: QMessageBox.warning(dialog, 'Bookmark unavailable', type(error).__name__); return
             def opened():
-                self.local_path = local; self.refresh_local()
+                self.show_local_directory(local, entries, skipped)
                 if self.sync_roots: self.sync_roots = (local, record['remote'])
             self.refresh_remote(record['remote'], opened); dialog.accept()
         def delete_current():

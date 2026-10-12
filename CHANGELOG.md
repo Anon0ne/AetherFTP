@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep local folders readable when a child entry is missing or inaccessible; retain the current folder on navigation failure.
+
 - Begin next-release file tools: per-tab filename include/exclude filters, with excluded folders pruned from upload plans.
 - Add private server-scoped paired bookmarks with save, open and delete controls.
 - Add synchronized browsing rooted at the current local/remote pair; update both panes only after a successful listing.
