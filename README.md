@@ -5,7 +5,11 @@
 
 A Windows FTP/FTPES/FTPS/SFTP client with a spacious dark purple/cyan interface inspired by Marauder V8 styling. Built with Python and PySide6/Qt. **Project builder: Anon0ne.**
 
-Current release: **0.1.1b**, a public beta. [Download the Windows ZIP](https://github.com/Anon0ne/AetherFTP/releases/download/v0.1.1b/AetherFTP-Windows-v0.1.1b.zip) · [Release notes](https://github.com/Anon0ne/AetherFTP/releases/tag/v0.1.1b) · [Changelog](CHANGELOG.md)
+Current release: **0.1.2b**, a public beta. [Download the Windows ZIP](https://github.com/Anon0ne/AetherFTP/releases/download/v0.1.2b/AetherFTP-Windows-v0.1.2b.zip) · [Release notes](https://github.com/Anon0ne/AetherFTP/releases/tag/v0.1.2b) · [Changelog](CHANGELOG.md)
+
+![AetherFTP 0.1.2b interface](docs/images/aetherftp-0.1.2b.png)
+
+*Windows interface with illustrative file lists; no live server or personal data is shown.*
 
 ## Install in minutes
 
@@ -19,22 +23,23 @@ Current release: **0.1.1b**, a public beta. [Download the Windows ZIP](https://g
 
 ## Features
 
-| Area | Available in 0.1.1b |
+| Area | Available in 0.1.2b |
 | --- | --- |
 | Connections | FTP, explicit TLS via FTPES/FTPS, SFTP, connection URLs, multiple tabs |
 | Server Book | Profiles with no saved password, Windows Credential Manager, or Windows-user DPAPI encryption |
-| Transfers | Background queue, recursive folder uploads, empty directories, local/Explorer drag-and-drop uploads, file downloads, opt-in resume |
+| Transfers | Background queue, recursive folder uploads, empty directories, local/Explorer drag-and-drop uploads, remote-to-local file/folder downloads, opt-in resume |
 | Network settings | Separate upload/download concurrency of 1–8 each; shared directional bandwidth limits in MB/s |
 | Queue control | Pause/Resume, Stop, Stop and exit, fresh visible queue after completed work |
 | Progress | Purple/cyan percentage bars, live MB/s, per-file duration and average speed |
-| Navigation | Include/exclude filename filters, paired bookmarks, synchronized browsing |
-| Remote tools | Right-click New file, New folder, Refresh and Edit in Notepad; confirmed save uploads and conflict checks |
+| Navigation | Include/exclude filename filters, paired bookmarks, synchronized browsing, cancellable remote filename search |
+| Drag-and-drop | Copy between local/remote panes and onto destination folders; same-tab remote folder moves |
+| Remote tools | Right-click New file/folder, Rename, Move, Delete, Search, Refresh and Edit in Notepad; confirmed editing uploads and conflict checks |
 | Interface | Adjustable activity divider capped at 35% of file workspace, custom Windows icon and Desktop shortcut |
 | Diagnostics | Connection steps, redacted server errors, Event log and rotating structured JSON logs |
 
 ## Current limits
 
-This beta supports explicit TLS, not implicit FTPS. Recursive folder downloads, saved queues, individual transfer retry controls, directory comparison and recursive remote search are planned. Resume checks sizes, not file identity; use it only for matching partial files. SFTP requires a verified host key in your Windows user's `known_hosts`. Real-server interoperability testing remains ongoing.
+This beta supports explicit TLS, not implicit FTPS. Saved queues, individual transfer retry controls, directory comparison and configurable external editors are planned. Recursive FTP searches, downloads and deletion require MLSD support. Remote-to-remote drops are same-tab moves; remote virtual-file drops into Windows Explorer are not implemented. Resume checks sizes, not file identity; use it only for matching partial files. SFTP requires a verified host key in your Windows user's `known_hosts`. Real-server interoperability testing remains ongoing.
 
 [Roadmap](ROADMAP.md) · [Detailed behavior and safeguards](docs/USAGE.md)
 

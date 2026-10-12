@@ -8,20 +8,24 @@ This is a proposal, not a list of implemented features. FileZilla's documented c
 
 Filename filters, paired bookmarks, synchronized browsing, Notepad remote editing with confirmed uploads and conflict checks, remote right-click file/folder creation, Windows compatibility-folder fixes, a distinct application icon, and Desktop shortcut support, global Pause/Resume and Stop controls, and Stop and exit.
 
+## Delivered in 0.1.2b
+
+Bidirectional pane drag-and-drop, folder downloads, remote folder moves, right-click Rename/Move/Delete and cancellable recursive filename search with result actions.
+
 ## Reliable queue control
 
 1. Add individual transfer/batch pause, cancellation and retry controls beyond the delivered global controls.
 2. Save pending queues between launches, without saving credentials in the queue; require reconnection before recovery.
-3. Recursive folder downloads with the same responsive batching as uploads.
+3. Extend recursive transfer interoperability beyond FTP servers with MLSD support.
 4. Per-server connection budgets covering browsing, uploads and downloads together; show current usage and explain server 421 limits.
 5. Failed/successful queue filters, batch totals, ETA and retry counts.
 
 ## File management
 
 - Color-coded directory comparison by size/date, with a preview before transferring changed files.
-- Remote Search button above the server pane: filename/glob search in the current directory, optional subfolders, background traversal, Stop support and scanned-folder counts. Results show full path, size and modified time, with open-folder, download and edit actions. Start with the existing browsing connection to avoid additional server login pressure.
+- Extend delivered Remote Search with modified timestamps and additional search criteria.
 - Local text search beyond the implemented glob filters.
-- Remote rename, delete and permission controls, with confirmations for destructive operations (mkdir is implemented).
+- Remote permission controls beyond the delivered Rename, Move, Delete and mkdir operations.
 - Configurable external editors beyond the implemented Notepad workflow.
 
 ## AetherFTP additions

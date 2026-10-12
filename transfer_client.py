@@ -111,6 +111,30 @@ class Client:
                     entries.append((short,isdir,0))
             finally:self.conn.cwd(old)
         return sorted(entries,key=lambda x:(not x[1],x[0].lower()))
+    def check_directory_traversal(self, path):
+        """Reject a selected directory alias before recursive operations."""
+        import posixpath
+        path = posixpath.normpath(path)
+        if path == "/": return
+        if self.kind == "SFTP":
+            if not stat.S_ISDIR(self.conn.lstat(path).st_mode):
+                raise ValueError("Recursive operations do not follow directory links")
+        else:
+            import posixpath
+            parent = posixpath.dirname(path.rstrip("/")) or "/"
+            name = posixpath.basename(path.rstrip("/"))
+            if not any(n == name and directory for n, directory, _ in self.listdir_safe(parent)):
+                raise ValueError("Remote folder is missing or a directory link")
+
+    def listdir_safe(self, path):
+        """Recursive operations require reliable directory types, never CWD probes."""
+        if self.kind == "SFTP": return self.listdir(path)
+        try:
+            return [(name, facts.get("type") == "dir", int(facts.get("size", "0")))
+                    for name, facts in self.conn.mlsd(path) if name not in (".", "..")]
+        except (ftplib.error_perm, AttributeError) as error:
+            raise RuntimeError("Recursive operations require FTP MLSD support to avoid following directory links") from error
+
     def ensure_directory(self, path):
         """Accept an existing directory, but never suppress a create failure."""
         if self.kind == 'SFTP':
@@ -131,6 +155,17 @@ class Client:
                     raise error
                 finally:
                     self.conn.cwd(previous)
+    def remove_file(self, path):
+        if self.kind == "SFTP": self.conn.remove(path)
+        else: self.conn.delete(path)
+
+    def remove_directory(self, path):
+        self.conn.rmdir(path)
+
+    def rename(self, source, destination):
+        """Server-side rename/move; caller checks destination conflicts."""
+        self.conn.rename(source, destination)
+
     def download(self,remote,local,callback,resume=False):
         if self.kind != 'SFTP': self.conn.voidcmd('TYPE I')
         offset = os.path.getsize(local) if resume and os.path.exists(local) else 0

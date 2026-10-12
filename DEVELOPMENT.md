@@ -13,7 +13,7 @@ Windows Python 3.12: automated tests include real DPAPI encryption/decryption an
 ## Remaining work
 
 - Test against controlled real FTP/FTPS/SFTP servers, including interrupted transfers and REST support.
-- Add recursive downloads, individual queue controls and persisted recovery. Local-to-server pane drag-and-drop and recursive folder uploads are implemented in 0.5.0.
+- Add individual queue controls and persisted recovery. Local-to-server pane drag-and-drop and recursive folder uploads are implemented in 0.5.0.
 - Test Credential Manager lifecycle and migration with disposable credentials on a dedicated Windows test machine.
 - Expand keyboard, accessibility, enlarged-font and narrow-window validation.
 - Verify hosted Windows Actions for each release before publishing.
@@ -27,3 +27,7 @@ Source history uses Justin Funderburk's supplied author identity. Product builde
 ## 0.1.1b verification
 
 94 tests cover the released file tools, remote creation safeguards, real Qt context-menu actions, private bookmarks, synchronization, edit conflict checks, compatibility-folder navigation icon resources, pause/resume, cancellation, socket interruption and exit accounting. Standard ICO sizes are 16, 24, 32, 48, 64, 128 and 256 pixels. Windows CI verifies source startup and the packaged icon-bearing application before publication. PowerShell installer and shortcut scripts pass syntax validation.
+
+## 0.1.2b verification
+
+116 tests cover remote traversal, recursive downloads, Windows destination safety, conflict preflight, deletion ordering, actual Qt drop events, destination dialogs and search cancellation/rendering, alongside prior regressions. Adapter tests use disposable trees; broad live-server validation remains ongoing. Windows CI must pass for the exact release commit before publication.

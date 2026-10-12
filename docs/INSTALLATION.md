@@ -4,7 +4,7 @@
 
 ## Ready-to-run release
 
-1. Open [GitHub Releases](https://github.com/Anon0ne/AetherFTP/releases) and download `AetherFTP-Windows-v0.1.1b.zip` and optionally `SHA256SUMS.txt`.
+1. Open [GitHub Releases](https://github.com/Anon0ne/AetherFTP/releases) and download `AetherFTP-Windows-v0.1.2b.zip` and optionally `SHA256SUMS.txt`.
 2. Extract the entire ZIP to a permanent folder. Do not run the EXE directly inside the ZIP.
 3. Run `AetherFTP.exe`. Python and a separate Qt installation are not required.
 4. Run `Create_Desktop_Shortcut.bat` to create the Windows Desktop shortcut. Its target and icon come from the EXE in this folder.
@@ -14,7 +14,7 @@ The executable is not currently code-signed. Windows may show an unknown-publish
 To verify the ZIP in PowerShell:
 
 ```powershell
-Get-FileHash -LiteralPath .\AetherFTP-Windows-v0.1.1b.zip -Algorithm SHA256
+Get-FileHash -LiteralPath .\AetherFTP-Windows-v0.1.2b.zip -Algorithm SHA256
 ```
 
 Compare the result with the matching ZIP entry in `SHA256SUMS.txt` from the same release. GitHub also provides SHA-256 asset digests. No administrator access is required for the portable application or per-user shortcut.

@@ -40,6 +40,7 @@ from file_tools import (load_bookmarks, save_bookmarks, server_scope, paired_pat
 from local_files import read_directory, navigation_path
 from app_assets import icon_path, set_windows_identity
 from transfer_control import OperationCancelled, check_cancelled
+from remote_operations import search_remote, plan_downloads, move_remote, delete_remote
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -80,35 +81,65 @@ def configure_logging():
 
 
 class FileTree(QTreeWidget):
-    def __init__(self, drop=None):
+    REMOTE_MIME = 'application/x-aetherftp-remote-items'
+    def __init__(self, drop=None, session=None, side='local'):
         super().__init__()
         self.setHeaderLabels(['Name', 'Size'])
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.drop_files = drop
-        if drop is not None:
-            self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
-        self.setAcceptDrops(drop is not None)
+        self.session, self.side = session, ("remote" if drop and session is None else side)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setAcceptDrops(drop is not None or session is not None)
     def startDrag(self, supported_actions):
-        urls = []
-        for item in self.selectedItems():
-            if item.text(0) == '..': continue
-            data = item.data(0, Qt.ItemDataRole.UserRole)
-            if data: urls.append(QUrl.fromLocalFile(data[0]))
-        if not urls: return
-        mime = QMimeData(); mime.setUrls(urls)
-        drag = QDrag(self); drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.CopyAction)
+        entries = [item.data(0, Qt.ItemDataRole.UserRole) for item in self.selectedItems()
+                   if item.text(0) != '..' and item.data(0, Qt.ItemDataRole.UserRole)]
+        if not entries: return
+        mime = QMimeData()
+        if self.side == 'remote' and self.session:
+            if not self.session.connected: return
+            mime.setData(self.REMOTE_MIME, json.dumps({'session': self.session.drag_id,
+                'scope': server_scope(self.session.connection_args), 'entries': entries}).encode())
+            actions = Qt.DropAction.CopyAction | Qt.DropAction.MoveAction
+        else:
+            mime.setUrls([QUrl.fromLocalFile(entry[0]) for entry in entries])
+            actions = Qt.DropAction.CopyAction
+        drag = QDrag(self); drag.setMimeData(mime); drag.exec(actions)
+    def accepts(self, mime):
+        if mime.hasFormat(self.REMOTE_MIME):
+            return self.session is not None and self.session.connected
+        return self.side == 'remote' and (self.drop_files or self.session) and mime.hasUrls() and any(url.isLocalFile() for url in mime.urls())
+    def action(self, mime):
+        return Qt.DropAction.MoveAction if self.side == 'remote' and mime.hasFormat(self.REMOTE_MIME) else Qt.DropAction.CopyAction
     def dragEnterEvent(self, event):
-        if self.drop_files and event.mimeData().hasUrls():
-            event.setDropAction(Qt.DropAction.CopyAction); event.accept()
+        if self.accepts(event.mimeData()): event.setDropAction(self.action(event.mimeData())); event.accept()
+        else: event.ignore()
     def dragMoveEvent(self, event):
-        if self.drop_files and event.mimeData().hasUrls():
-            event.setDropAction(Qt.DropAction.CopyAction); event.accept()
+        self.dragEnterEvent(event)
     def dropEvent(self, event):
-        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
-        self.drop_files(paths)
-        event.setDropAction(Qt.DropAction.CopyAction); event.accept()
+        mime = event.mimeData()
+        if not self.accepts(mime): event.ignore(); return
+        item = self.itemAt(event.position().toPoint())
+        data = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        target = data[0] if data and data[1] else None
+        if mime.hasFormat(self.REMOTE_MIME):
+            try:
+                payload = json.loads(bytes(mime.data(self.REMOTE_MIME)))
+                if payload['session'] != self.session.drag_id or payload['scope'] != server_scope(self.session.connection_args):
+                    raise ValueError('Remote drops must stay in the same connection tab')
+                entries = payload['entries']
+                if not isinstance(entries,list) or not entries or any(not isinstance(e,list) or len(e)!=2 or not isinstance(e[0],str) or type(e[1]) is not bool for e in entries):
+                    raise ValueError('Invalid remote drag data')
+            except (ValueError, KeyError, TypeError):
+                self.session.status.setText('Invalid drop or different connection tab'); event.ignore(); return
+            if self.side == 'local': self.session.download_entries(entries, target)
+            else: self.session.move_entries(entries, target or self.session.remote_path)
+        else:
+            paths = [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+            if self.session: self.session.upload_paths(paths, target)
+            else: self.drop_files(paths)
+        event.setDropAction(self.action(mime)); event.accept()
 
 
 class ActivitySplitter(QSplitter):
@@ -147,6 +178,9 @@ class Session(QWidget):
     def __init__(self, logger, pool=None):
         super().__init__()
         self.logger = logger
+        self.drag_id = str(uuid.uuid4())
+        self.search_dialog = None
+        self.managing_remote = False
         self.client = Client()
         self.jobs = queue.Queue()
         self.events = queue.Queue()
@@ -204,6 +238,8 @@ class Session(QWidget):
             heading = QHBoxLayout()
             title = QLabel('◧  ' + side.upper() + ' FILESYSTEM'); title.setObjectName(side + 'Heading'); heading.addWidget(title)
             heading.addStretch()
+            if side == "remote":
+                search = QPushButton("Search"); search.clicked.connect(self.open_search); heading.addWidget(search)
             refresh = QPushButton('↻'); refresh.setToolTip('Refresh ' + side + ' files'); refresh.setAccessibleName('Refresh ' + side + ' files')
             refresh.clicked.connect(self.refresh_local if side == 'local' else self.refresh_remote); heading.addWidget(refresh)
             box.addLayout(heading)
@@ -211,13 +247,9 @@ class Session(QWidget):
             path.setAccessibleName(side.title() + ' directory')
             path.returnPressed.connect(lambda s=side: self.navigate(s))
             box.addWidget(path); setattr(self, side + '_display', path)
-            tree = FileTree(self.upload_paths if side == 'remote' else None)
-            if side == 'local':
-                tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-                tree.setDragEnabled(True)
-                tree.setToolTip('Drag selected files or folders to the remote pane to upload.')
-            else:
-                tree.setToolTip('Drop local files or folders here to upload into the current remote directory.')
+            tree = FileTree(session=self, side=side)
+            tree.setToolTip('Drag to the other pane to copy. Drop onto a folder to use that destination.' +
+                (' Drag onto a remote folder to move.' if side == 'remote' else ''))
             tree.setMinimumHeight(80)
             tree.itemDoubleClicked.connect(lambda item, col, s=side: self.open_item(s, item))
             box.addWidget(tree, 1); setattr(self, side + '_tree', tree)
@@ -268,14 +300,16 @@ class Session(QWidget):
         height = min(self.activity_height, int(total * .35)) if visible else 40
         self.activity_splitter.setSizes([max(0, total - self.activity_splitter.handleWidth() - height), height])
 
-    def submit(self, action, success=None, row=None, operation='Operation'):
+    def submit(self, action, success=None, row=None, operation='Operation', on_finished=None):
         self.pending += 1
-        self.jobs.put((action, success, row, operation))
+        self.jobs.put((action, success, row, operation, on_finished))
     def raise_if_stopped(self):
         check_cancelled(self.stop_event)
 
     def stop_operations(self):
         self.stop_event.set(); self.connected = False
+        if self.search_dialog:
+            self.search_dialog.cancelled.set(); self.search_dialog.finish()
         self.queue_timer.stop()
         for batch in self.active_batches:
             if not batch['finished']:
@@ -336,6 +370,10 @@ class Session(QWidget):
                 if len(event) > 1 and event[1]: event[1]()
                 if self.stop_event.is_set():
                     self.status.setText(f'Stopping operations… {self.pending} remaining' if self.pending else 'Stopped; reconnect to start new work')
+            elif event[0] == 'search_progress':
+                event[1].progress.setText(f'Scanned {event[2]} folders…')
+            elif event[0] == 'search_finished':
+                event[1].finish()
             elif event[0] == 'connection_step':
                 self.log.appendPlainText(event[2] + '  ' + event[1])
                 self.logger.info(json.dumps({'event': 'connection_step', 'timestamp': event[2], 'stage': event[1]}))
@@ -513,6 +551,7 @@ class Session(QWidget):
             getattr(self, side + '_display').setText(path); self.navigate(side)
     def enqueue_transfer(self, direction, source, dest, resume_override=None, refresh=True, barrier=None, on_finished=None, transfer_override=None, on_success=None):
         if not self.connected: self.status.setText('Connect to a server first'); return
+        if self.remote_mutation_locked(): return
         self.clear_finished_queue()
         resume = self.resume.isChecked() if resume_override is None else resume_override
         row = self.transfers.topLevelItemCount()
@@ -633,6 +672,7 @@ class Session(QWidget):
             QMessageBox.warning(self, 'Editor unavailable', type(error).__name__)
 
     def edit_remote_file(self):
+        if self.remote_mutation_locked(): return
         if not self.connected: self.status.setText('Connect before editing remote files'); return
         selected = self.remote_tree.selectedItems()
         if len(selected) != 1 or selected[0].data(0, Qt.ItemDataRole.UserRole)[1]:
@@ -666,6 +706,13 @@ class Session(QWidget):
         selected = self.remote_tree.selectedItems()
         edit.setEnabled(self.connected and len(selected) == 1 and
                         not selected[0].data(0, Qt.ItemDataRole.UserRole)[1])
+        menu.addSeparator()
+        manageable = self.connected and not self.pending and not self.edits
+        entries = self.selected_remote_entries()
+        menu.addAction('Rename…', self.rename_selected).setEnabled(manageable and len(entries) == 1)
+        menu.addAction('Move…', lambda: self.move_entries(self.selected_remote_entries())).setEnabled(manageable and bool(entries))
+        menu.addAction('Delete…', self.delete_selected).setEnabled(manageable and bool(entries))
+        menu.addAction('Search…', self.open_search).setEnabled(self.connected)
         menu.addSeparator()
         menu.addAction('New file…', lambda: self.create_remote_item(False)).setEnabled(self.connected)
         menu.addAction('New folder…', lambda: self.create_remote_item(True)).setEnabled(self.connected)
@@ -767,12 +814,13 @@ class Session(QWidget):
             if hidden: item.setSelected(False)
             item.setHidden(hidden)
 
-    def upload_paths(self, paths):
+    def upload_paths(self, paths, target=None):
+        if self.remote_mutation_locked(): return
         if not self.connected:
             self.status.setText('Connect to a server first'); return
         paths = [Path(path) for path in paths]
         if not paths: return
-        target = self.remote_path
+        target = target or self.remote_path
         if not self.resume.isChecked() and QMessageBox.question(self, 'Upload files and folders',
                 f'Upload {len(paths)} selected item(s) into {target}?\n'
                 'Folders include their contents and empty subfolders. Existing matching files will be replaced.') != QMessageBox.StandardButton.Yes:
@@ -816,32 +864,191 @@ class Session(QWidget):
             if local is None:
                 row = self.transfers.topLevelItemCount()
                 self.transfers.addTopLevelItem(QTreeWidgetItem(['Create folder: ' + remote, 'Queued']))
-                self.submit(lambda p=remote: self.client.ensure_directory(p), row=row, operation='Create remote folder')
+                if batch.get('direction') == 'Download':
+                    self.submit(lambda p=remote: Path(p).mkdir(parents=True, exist_ok=True), row=row, operation='Create local folder')
+                else:
+                    self.submit(lambda p=remote: self.client.ensure_directory(p), row=row, operation='Create remote folder')
             else:
                 def file_finished(b=batch):
                     b['remaining'] -= 1; self.finish_upload_batch(b)
-                self.enqueue_transfer('Upload', local, remote, resume_override=batch['resume'], refresh=False,
+                self.enqueue_transfer(batch.get('direction', 'Upload'), local, remote, resume_override=batch['resume'], refresh=False,
                                       barrier=batch['barrier'], on_finished=file_finished)
             count += 1
     def finish_upload_batch(self, batch):
         if batch['dispatched'] and batch['directories_ready'] and batch['remaining'] == 0 and not batch['finished']:
             batch['finished'] = True; self.pending -= 1
             if batch in self.active_batches: self.active_batches.remove(batch)
-            self.refresh_remote()
+            if batch.get('direction') == 'Download': self.refresh_local()
+            else: self.refresh_remote()
     def upload_selected(self):
         self.upload_paths([Path(i.data(0, Qt.ItemDataRole.UserRole)[0]) for i in self.local_tree.selectedItems() if i.text(0) != '..'])
+    def selected_remote_entries(self):
+        return [item.data(0, Qt.ItemDataRole.UserRole) for item in self.remote_tree.selectedItems() if item.text(0) != '..']
     def download_selected(self):
-        for item in self.remote_tree.selectedItems():
-            source, directory = item.data(0, Qt.ItemDataRole.UserRole)
-            if directory: continue
-            name = posixpath.basename(source)
-            if name in ('.', '..') or '/' in name or '\\' in name or ':' in name:
-                self.status.setText('Unsafe remote filename'); continue
-            dest = self.local_path / name
-            if dest.exists() and not self.resume.isChecked() and QMessageBox.question(self, 'Replace file', 'Replace ' + name + '?') != QMessageBox.StandardButton.Yes: continue
-            self.enqueue_transfer('Download', source, str(dest))
+        self.download_entries(self.selected_remote_entries())
+    def download_entries(self, entries, target=None):
+        if self.remote_mutation_locked(): return
+        if not self.connected: self.status.setText('Connect to a server first'); return
+        if not entries: return
+        target = Path(target or self.local_path)
+        if QMessageBox.question(self, 'Download files and folders',
+                f'Download {len(entries)} item(s) into {target}? Existing matching files may be replaced.\n'
+                'Resume only matching partial files.') != QMessageBox.StandardButton.Yes: return
+        self.clear_finished_queue(); resume = self.resume.isChecked(); file_filter = self.file_filter
+        def ready(plan):
+            directories, files = plan
+            actions = chain(((None, directory) for directory in directories), iter(files))
+            batch = {'actions': iter(actions), 'resume': resume, 'direction': 'Download',
+                'remaining': len(files), 'barrier': threading.Event(), 'directories_ready': False,
+                'dispatched': False, 'finished': False}
+            self.upload_batches.append(batch); self.active_batches.append(batch); self.pending += 1
+            self.status.setText(f'Queued {len(directories)} folders and {len(files)} downloads')
+            self.queue_timer.start()
+        self.submit(lambda: plan_downloads(self.client, entries, target, file_filter, self.raise_if_stopped), ready, operation='Download planning')
+    def related_sessions(self):
+        window = self.window()
+        sessions = [window.tabs.widget(i) for i in range(window.tabs.count())] if hasattr(window, 'tabs') else [self]
+        if not self.connection_args: return [self]
+        scope = server_scope(self.connection_args)
+        return [s for s in sessions if s.connection_args and server_scope(s.connection_args) == scope]
+    def remote_mutation_locked(self):
+        if any(s.managing_remote for s in self.related_sessions()):
+            self.status.setText('Wait for remote file management to finish'); return True
+        return False
+    def remote_management_ready(self):
+        if not self.connected: self.status.setText('Connect to a server first'); return False
+        if any(s.pending or s.edits or s.managing_remote for s in self.related_sessions()):
+            self.status.setText('Finish or stop operations and editing sessions on this server before managing remote files'); return False
+        return True
+    def submit_remote_management(self, action, operation):
+        self.managing_remote = True
+        self.submit(action, lambda _: self.refresh_remote(), operation=operation,
+                    on_finished=lambda: setattr(self, 'managing_remote', False))
+    def move_entries(self, entries, target=None):
+        if not entries or not self.remote_management_ready(): return
+        if target is None:
+            target, accepted = QInputDialog.getText(self, 'Move remote items', 'Destination remote folder:', text=self.remote_path)
+            if not accepted: return
+        target = target.strip()
+        if not target: return
+        if not target.startswith('/'): target = posixpath.join(self.remote_path, target)
+        target = posixpath.normpath(target)
+        if QMessageBox.question(self, 'Move remote items', 'Move these items to '+target+'?\n'+
+                '\n'.join(source for source, _ in entries)+'\nExisting destination names will not be overwritten.') != QMessageBox.StandardButton.Yes: return
+        self.submit_remote_management(lambda: move_remote(self.client, entries, target, self.raise_if_stopped), 'Move remote items')
+    def rename_selected(self):
+        entries = self.selected_remote_entries()
+        if len(entries) != 1 or not self.remote_management_ready(): return
+        source, directory = entries[0]
+        name, accepted = QInputDialog.getText(self, 'Rename remote item', 'New name:', text=posixpath.basename(source))
+        if not accepted: return
+        try: validate_remote_name(name)
+        except ValueError as error: self.status.setText(str(error)); return
+        destination = posixpath.join(posixpath.dirname(source), name)
+        def rename():
+            if any(entry[0].casefold()==name.casefold() for entry in self.client.listdir(posixpath.dirname(source) or '/')):
+                raise FileExistsError('Destination already exists')
+            self.raise_if_stopped(); self.client.rename(source, destination)
+        self.submit_remote_management(rename, 'Rename remote item')
+    def delete_selected(self):
+        entries = self.selected_remote_entries()
+        if not entries or not self.remote_management_ready(): return
+        if QMessageBox.warning(self, 'Delete remote items', 'Permanently delete these items, including all contents of selected folders?\n'+
+                '\n'.join(source for source, _ in entries)+'\nThis cannot be undone.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
+        self.submit_remote_management(lambda: delete_remote(self.client, entries, self.raise_if_stopped), 'Delete remote items')
+    def open_search(self):
+        if not self.connected: self.status.setText('Connect to a server first'); return
+        if self.search_dialog is None: self.search_dialog = RemoteSearch(self)
+        self.search_dialog.show(); self.search_dialog.raise_()
     def server_book(self):
         dialog = ServerBook(self); dialog.exec()
+
+
+class RemoteSearch(QDialog):
+    """Modeless, cancellable remote filename search using the browsing worker."""
+    def __init__(self, session):
+        super().__init__(session)
+        self.session = session; self.cancelled = threading.Event(); self.busy = False; self.scope = None
+        self.setWindowTitle('Remote Search'); self.resize(760, 450)
+        layout = QVBoxLayout(self)
+        form = QFormLayout(); self.folder = QLineEdit(session.remote_path); self.pattern = QLineEdit('*')
+        form.addRow('Remote folder', self.folder); form.addRow('Filename / glob', self.pattern); layout.addLayout(form)
+        self.recursive = QCheckBox('Include subfolders'); layout.addWidget(self.recursive)
+        row = QHBoxLayout(); self.start = QPushButton('Search'); self.stop = QPushButton('Stop search'); self.stop.setEnabled(False)
+        self.start.clicked.connect(self.begin); self.stop.clicked.connect(lambda: self.cancelled.set())
+        row.addWidget(self.start); row.addWidget(self.stop); layout.addLayout(row)
+        self.progress = QLabel('Search the current folder or include subfolders.'); layout.addWidget(self.progress)
+        self.results = QTreeWidget(); self.results.setHeaderLabels(['Name', 'Remote path', 'Size'])
+        self.results.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.results.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection); layout.addWidget(self.results)
+        actions = QHBoxLayout()
+        for label, callback in [('Open containing folder', self.open_folder), ('Download', self.download), ('Edit in Notepad', self.edit)]:
+            button = QPushButton(label); button.clicked.connect(callback); actions.addWidget(button)
+        layout.addLayout(actions)
+        self.results.itemDoubleClicked.connect(lambda *_: self.open_folder())
+        self.render_timer = QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self.render_results)
+        self.render_pending = deque(); self.result_count = 0
+    def begin(self):
+        if self.busy or not self.session.connected or self.session.remote_mutation_locked(): return
+        root = self.folder.text().strip()
+        if not root.startswith('/'): root = posixpath.join(self.session.remote_path, root)
+        pattern = self.pattern.text().strip() or '*'
+        if '/' in pattern or '\\' in pattern:
+            self.progress.setText('Enter a filename or glob, not a path'); return
+        self.cancelled = threading.Event(); self.scope = server_scope(self.session.connection_args)
+        self.busy = True; self.start.setEnabled(False); self.stop.setEnabled(True); self.results.clear()
+        self.progress.setText('Search queued…'); recursive = self.recursive.isChecked()
+        def checkpoint():
+            self.session.raise_if_stopped(); check_cancelled(self.cancelled)
+        def search():
+            try:
+                return search_remote(self.session.client, root, pattern, recursive, checkpoint,
+                    lambda count: self.session.events.put(('search_progress', self, count)))
+            finally: self.session.events.put(('search_finished', self))
+        def done(entries):
+            if not self.isVisible(): return
+            self.render_pending = deque(entries); self.result_count = len(entries)
+            self.busy = True; self.start.setEnabled(False); self.stop.setEnabled(True)
+            self.render_timer.start()
+        self.session.submit(search, done, operation='Remote Search')
+    def render_results(self):
+        if self.cancelled.is_set() or self.session.stop_event.is_set():
+            self.render_pending.clear(); self.finish(); return
+        deadline = time.monotonic() + .008; count = 0
+        while self.render_pending and count < 100 and time.monotonic() < deadline:
+            name, directory, size, path = self.render_pending.popleft()
+            item = QTreeWidgetItem([name, path, '<DIR>' if directory else str(size)])
+            item.setData(0, Qt.ItemDataRole.UserRole, (path, directory)); self.results.addTopLevelItem(item); count += 1
+        if not self.render_pending:
+            self.finish(); self.progress.setText(f'{self.result_count} result(s)')
+    def finish(self):
+        self.render_timer.stop()
+        self.busy = False; self.start.setEnabled(True); self.stop.setEnabled(False)
+        self.progress.setText('Search stopped' if self.cancelled.is_set() or self.session.stop_event.is_set() else 'Search finished; see Event log for any errors')
+    def entries(self):
+        if self.busy or not self.session.connected or self.scope != server_scope(self.session.connection_args):
+            self.progress.setText('Reconnect and run a new search before using these results'); return []
+        return [item.data(0, Qt.ItemDataRole.UserRole) for item in self.results.selectedItems()]
+    def open_folder(self):
+        entries = self.entries()
+        if not entries: return
+        path, directory = entries[0]
+        self.session.refresh_remote(path if directory else posixpath.dirname(path))
+    def download(self):
+        self.session.download_entries(self.entries())
+    def edit(self):
+        entries = self.entries()
+        if len(entries) != 1 or entries[0][1]: return
+        path = entries[0][0]
+        def select():
+            for index in range(self.session.remote_tree.topLevelItemCount()):
+                item = self.session.remote_tree.topLevelItem(index)
+                if item.data(0, Qt.ItemDataRole.UserRole)[0] == path:
+                    item.setHidden(False); item.setSelected(True); self.session.edit_remote_file(); break
+        self.session.refresh_remote(posixpath.dirname(path), select)
+    def closeEvent(self, event):
+        self.cancelled.set(); self.render_timer.stop(); self.render_pending.clear(); super().closeEvent(event)
 
 
 class ServerBook(QDialog):

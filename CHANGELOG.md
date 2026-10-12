@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.2b - 2026-10-12
+
+- Add remote-to-local file/folder drag-and-drop downloads, preserving nested and empty folders through the responsive queue.
+- Use hovered local/remote folders as drop destinations; retain local/Explorer-to-remote uploads.
+- Add same-tab remote-to-remote drag-and-drop moves with confirmation and destination conflict checks.
+- Add remote right-click Rename, Move (destination-folder dialog), and confirmed permanent Delete, including folder contents.
+- Block remote mutations during same-server queued operations or editing sessions; prevent new transfers while a mutation is active.
+- Add modeless Remote Search with case-insensitive filename globs, optional subfolders, scanned-folder counts, Stop and bounded result rendering.
+- Open search-result folders, download selected results or edit a selected file in Notepad.
+- Validate local download paths, reject Windows filename collisions and refuse moves into descendants or existing destination names.
+- Require reliable directory types for recursive FTP operations (MLSD); avoid traversing selected directory links.
+- Update installation, usage, troubleshooting, build and release documentation.
+
 ## 0.1.1b - 2026-10-12
 
 - Add Menu controls to pause/resume transfers and stop queued/running operations, including folder scanning and bandwidth waits.
