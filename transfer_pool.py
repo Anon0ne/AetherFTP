@@ -73,7 +73,8 @@ class TransferPool:
                 with self.condition:
                     while True:
                         if self.stopped: return
-                        if slot >= self.limits[direction] and client:
+                        if client and (slot >= self.limits[direction] or
+                                       (not any(self.jobs.values()) and not self.active_slots)):
                             client.close(); connected_args = None
                         candidate = None
                         if slot < self.limits[direction]:
@@ -97,7 +98,10 @@ class TransferPool:
                     self.run(client, ensure_connected, job)
                 finally:
                     with self.condition:
-                        self.resources.discard(resource); self.active_slots.discard((direction, slot)); self.condition.notify_all()
+                        self.resources.discard(resource); self.active_slots.discard((direction, slot))
+                        if not any(self.jobs.values()) and not self.active_slots:
+                            self.close_idle_connections()
+                        self.condition.notify_all()
         finally:
             if client: client.close()
 

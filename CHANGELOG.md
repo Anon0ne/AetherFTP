@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 — 2026-10-12
+
+- Add a draggable divider for the Queue/Event Log panel, capped at 35% of the file workspace height.
+- Retain the chosen height when collapsing and reopening transfer activity.
+- Close transfer connections when the queue drains, preserving reuse during active batches.
+- Retry a failed TLS directory listing once on a fresh browsing connection; certificate failures remain fatal.
+- Start a fresh visible queue for new work after the previous batch is fully idle, retaining timing/log history.
+
 ## 0.6.0 — 2026-10-12
 
 - Add a Menu drop-down with Settings and Exit.

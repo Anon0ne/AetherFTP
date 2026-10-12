@@ -16,6 +16,10 @@ Windows Python 3.12: automated tests include real DPAPI encryption/decryption an
 - Add recursive downloads, queue pause/cancel and persisted recovery. Local-to-server pane drag-and-drop and recursive folder uploads are implemented in 0.5.0.
 - Test Credential Manager lifecycle and migration with disposable credentials on a dedicated Windows test machine.
 - Expand keyboard, accessibility, enlarged-font and narrow-window validation.
-- Restore GitHub authentication, create a private repository, and verify hosted Actions before publishing a release.
+- Verify hosted Windows Actions for each release before publishing.
 
 Source history uses Justin Funderburk's supplied author identity. Product builder credit is Anon0ne.
+
+## v0.6.1 verification
+
+55 automated tests cover the adjustable activity height cap, idle worker connection cleanup, bounded TLS listing recovery and safe queue clearing. Product builder credit remains Anon0ne. See ROADMAP.md for proposed features.

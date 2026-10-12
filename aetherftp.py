@@ -7,6 +7,7 @@ from pathlib import Path
 import posixpath
 import queue
 import sys
+import ssl
 import threading
 import uuid
 import time
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTabWidget,
     QSplitter, QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
     QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView, QProgressBar, QAbstractItemView,
-    QMenu, QSpinBox, QDoubleSpinBox)
+    QMenu, QSpinBox, QDoubleSpinBox, QSizePolicy, QLayout)
 from server_book import (load_profiles, save_profiles, encrypt_password,
     profile_password, windows_vault, STORE)
 from transfer_client import Client
@@ -46,6 +47,8 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPushBut
 QHeaderView::section { background: #202b3c; color: #9caac1; border: none; padding: 6px; }
 QTabBar::tab { background: #151d2c; padding: 5px 16px; margin-right: 3px; }
 QTabWidget::pane { border: none; }
+QSplitter#activitySplitter::handle { background: #39465c; }
+QSplitter#activitySplitter::handle:hover { background: #38bdf8; }
 QTreeWidget::item:selected { background: #493b75; }
 QLabel#brand { color: #a78bfa; font-size: 20pt; font-weight: 600; }
 QLabel#muted { color: #9caac1; }
@@ -100,6 +103,37 @@ class FileTree(QTreeWidget):
         event.setDropAction(Qt.DropAction.CopyAction); event.accept()
 
 
+class ActivitySplitter(QSplitter):
+    """Keep the activity section within 35% of the file/activity workspace."""
+    def __init__(self):
+        super().__init__(Qt.Orientation.Vertical)
+        self.setObjectName('activitySplitter')
+        self.setHandleWidth(7)
+        self.setChildrenCollapsible(False)
+        self.splitterMoved.connect(self.constrain_activity)
+
+    def setSizes(self, sizes):
+        total = max(0, self.height() - self.handleWidth())
+        requested = int(total * sizes[1] / max(1, sum(sizes)))
+        bottom = min(requested, int(self.height() * .35))
+        super().setSizes([total - bottom, bottom])
+
+    def constrain_activity(self, position, index):
+        if self.sizes()[1] > int(self.height() * .35):
+            self.setSizes(self.sizes())
+
+    def resizeEvent(self, event):
+        self.update_activity_limit()
+        super().resizeEvent(event)
+        if self.count() == 2:
+            self.constrain_activity(0, 1)
+
+    def update_activity_limit(self):
+        if self.count() == 2:
+            self.widget(1).setMaximumHeight(max(1, int(self.height() * .35)))
+            self.refresh()
+
+
 class Session(QWidget):
     """Serialized browsing plus isolated transfer connections; GUI changes stay on the GUI thread."""
     def __init__(self, logger, pool=None):
@@ -146,7 +180,8 @@ class Session(QWidget):
             form.addWidget(button, 0, Qt.AlignmentFlag.AlignBottom)
         layout.addWidget(connection)
         self.status = QLabel('● OFFLINE'); self.status.setObjectName('muted'); layout.addWidget(self.status)
-        split = QSplitter(); split.setChildrenCollapsible(False); layout.addWidget(split, 1)
+        self.activity_splitter = ActivitySplitter(); layout.addWidget(self.activity_splitter, 1)
+        split = QSplitter(); split.setChildrenCollapsible(False); self.activity_splitter.addWidget(split)
         self.file_splitter = split
         for side in ('local', 'remote'):
             panel = QWidget(); panel.setObjectName('panel')
@@ -176,27 +211,43 @@ class Session(QWidget):
             transfer.clicked.connect(self.upload_selected if side == 'local' else self.download_selected); footer.addWidget(transfer)
             box.addLayout(footer); split.addWidget(panel)
         split.setSizes([580, 580])
+        activity_panel = QWidget()
+        activity_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        activity_layout = QVBoxLayout(activity_panel); activity_layout.setContentsMargins(0, 0, 0, 0)
+        activity_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self.activity_splitter.addWidget(activity_panel)
+        self.activity_splitter.setStretchFactor(0, 1); self.activity_splitter.setStretchFactor(1, 0)
+        self.activity_splitter.handle(1).setToolTip('Drag to resize transfer activity (maximum 35%)')
         activity_bar = QHBoxLayout()
         self.activity_toggle = QPushButton('▸ Transfer activity')
         self.activity_toggle.setCheckable(True); self.activity_toggle.toggled.connect(self.toggle_activity)
         activity_bar.addWidget(self.activity_toggle); activity_bar.addStretch()
         self.resume = QCheckBox('Resume partial files')
         self.resume.setToolTip('Use only when the destination contains the exact source prefix.')
-        activity_bar.addWidget(self.resume); layout.addLayout(activity_bar)
-        self.activity = QTabWidget(); self.activity.setFixedHeight(110)
+        activity_bar.addWidget(self.resume); activity_layout.addLayout(activity_bar)
+        self.activity = QTabWidget(); self.activity.setMinimumHeight(0)
+        self.activity.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         self.transfers = QTreeWidget(); self.transfers.setHeaderLabels(['Transfer queue', 'State / progress'])
         self.transfers.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.activity.addTab(self.transfers, 'Queue')
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.activity.addTab(self.log, 'Event log')
         self.log.setMaximumBlockCount(1000)
-        layout.addWidget(self.activity); self.activity.hide()
+        activity_layout.addWidget(self.activity, 1); self.activity.hide()
+        self.activity_height = 150
+        self.activity_splitter.setSizes([600, 40])
         self.timer = QTimer(self); self.timer.timeout.connect(self.pump); self.timer.start(16)
         self.queue_timer = QTimer(self); self.queue_timer.setInterval(10)
         self.queue_timer.timeout.connect(self.dispatch_upload_batch)
         self.refresh_local()
     def toggle_activity(self, visible):
+        if not visible:
+            self.activity_height = self.activity_splitter.sizes()[1]
         self.activity.setVisible(visible)
+        self.activity_splitter.update_activity_limit()
         self.activity_toggle.setText(('▾' if visible else '▸') + ' Transfer activity')
+        total = self.activity_splitter.height()
+        height = min(self.activity_height, int(total * .35)) if visible else 40
+        self.activity_splitter.setSizes([max(0, total - self.activity_splitter.handleWidth() - height), height])
 
     def submit(self, action, success=None, row=None, operation='Operation'):
         self.pending += 1
@@ -355,7 +406,21 @@ class Session(QWidget):
                 for item in self.remote_tree.findItems(self.url_filename, Qt.MatchFlag.MatchExactly, 0):
                     item.setSelected(True); self.remote_tree.scrollToItem(item)
                 self.url_filename = ''
-        self.submit(lambda: self.client.listdir(path), done, operation='Directory listing')
+        def listing():
+            try:
+                return self.client.listdir(path)
+            except ssl.SSLCertVerificationError:
+                raise
+            except ssl.SSLError as error:
+                if not self.connection_args or self.connection_args[-1] not in ('FTPES', 'FTPS'):
+                    raise
+                reply = redact_message(str(error), self.connection_secrets)
+                self.client.step('Directory listing TLS failure: ' + reply)
+                self.client.step('Reconnecting browsing connection; retrying directory listing once')
+                self.client.close()
+                self.client.connect(*self.connection_args)
+                return self.client.listdir(path)
+        self.submit(listing, done, operation='Directory listing')
     def navigate(self, side):
         if side == 'local': self.local_path = Path(self.local_display.text()).expanduser(); self.refresh_local()
         else: self.refresh_remote()
@@ -365,6 +430,7 @@ class Session(QWidget):
             getattr(self, side + '_display').setText(path); self.navigate(side)
     def enqueue_transfer(self, direction, source, dest, resume_override=None, refresh=True, barrier=None, on_finished=None):
         if not self.connected: self.status.setText('Connect to a server first'); return
+        self.clear_finished_queue()
         resume = self.resume.isChecked() if resume_override is None else resume_override
         row = self.transfers.topLevelItemCount()
         self.transfers.addTopLevelItem(QTreeWidgetItem([direction + ': ' + Path(source).name, 'Queued']))
@@ -415,6 +481,13 @@ class Session(QWidget):
         scope = self.connection_args[:3] + self.connection_args[4:] if direction == 'Upload' else ()
         self.transfer_pool.submit(direction, (direction, scope, resource), self.connection_args,
             (self, transfer, completed, row, direction, on_finished), barrier=barrier)
+    def clear_finished_queue(self):
+        # Pending includes undispatched folder work and completion callbacks.
+        # Never recycle row indices while worker events can still reference them.
+        if self.pending == 0 and not self.upload_batches and self.events.empty():
+            self.transfers.clear()
+            self.progress_bars.clear()
+
     def upload_paths(self, paths):
         if not self.connected:
             self.status.setText('Connect to a server first'); return
@@ -425,6 +498,7 @@ class Session(QWidget):
                 f'Upload {len(paths)} selected item(s) into {target}?\n'
                 'Folders include their contents and empty subfolders. Existing matching files will be replaced.') != QMessageBox.StandardButton.Yes:
             return
+        self.clear_finished_queue()
         self.status.setText('Preparing upload queue…')
         resume = self.resume.isChecked()
         def ready(plan):

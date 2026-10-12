@@ -1,4 +1,4 @@
-# AetherFTP 0.6.0
+# AetherFTP 0.6.1
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -67,3 +67,11 @@ Open **Menu → Settings** to choose concurrent uploads and concurrent downloads
 Set upload and download bandwidth separately in decimal MB/s; **Unlimited** (0) disables that limit. Each directional limit is shared across all transfers in that window. Pacing occurs at transfer blocks, so short buffering bursts are possible. Bandwidth changes apply immediately. Increasing concurrency starts additional eligible work; lowering it lets existing transfers finish before applying the lower limit to new files.
 
 Preferences are stored without credentials in `%APPDATA%\AetherFTP\settings.json` and restored at startup. **Menu → Exit** uses the existing queue-active guard.
+
+## Adjustable activity panel
+
+Open **Transfer activity**, then drag the divider above it up or down. Queue and Event Log share the panel. The entire bottom section is capped at 35% of the file workspace, leaving the file lists usable. Collapsing and reopening it retains its height within the current window limits.
+
+Transfer connections are reused during active batches and closed when the queue drains. Each connected tab retains its browsing connection. Server limits apply to all clients from your IP, so lower concurrency if the server returns 421. A TLS directory-listing failure triggers one reconnect attempt; certificate verification errors are never bypassed.
+
+See [ROADMAP.md](ROADMAP.md) for proposed features.

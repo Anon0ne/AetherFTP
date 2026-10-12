@@ -616,3 +616,88 @@ def test_duplicate_destinations_are_serialized_even_with_parallel_slots():
         release.set(); assert done.wait(3)
         assert not violations
     finally: release.set(); pool.shutdown()
+
+def test_activity_divider_caps_height_and_preserves_size():
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from PySide6.QtWidgets import QApplication
+    from aetherftp import Session
+    app = QApplication.instance() or QApplication([])
+    session = Session(logging.getLogger('divider-test'))
+    try:
+        session.resize(1180, 760); session.show(); app.processEvents()
+        session.activity_toggle.setChecked(True); app.processEvents()
+        splitter = session.activity_splitter
+        splitter.setSizes([1, 10000]); app.processEvents()
+        assert splitter.sizes()[1] <= int(splitter.height() * .35)
+        expanded = splitter.sizes()[1]
+        session.activity_toggle.setChecked(False); app.processEvents()
+        session.activity_toggle.setChecked(True); app.processEvents()
+        assert abs(splitter.sizes()[1] - expanded) <= 2
+        session.resize(1180, 600); app.processEvents()
+        assert splitter.sizes()[1] <= int(splitter.height() * .35)
+        assert session.local_tree.height() >= 80
+    finally:
+        session.timer.stop(); session.close(); session.jobs.put(None); session.worker.join(1)
+
+def test_transfer_connections_close_when_queue_drains():
+    import threading
+    import time
+    from transfer_pool import TransferPool
+    clients = []
+    class FakeClient:
+        def __init__(self): self.conn = None; clients.append(self)
+        def connect(self, *args): self.conn = object()
+        def close(self): self.conn = None
+    finished = threading.Event()
+    def run(client, ensure, job): ensure(); finished.set()
+    pool = TransferPool(FakeClient, run)
+    try:
+        pool.submit('Upload', 'target', ('example.invalid',21,'test','secret','FTP'), None)
+        assert finished.wait(2)
+        deadline = time.monotonic() + 2
+        while any(c.conn is not None for c in clients) and time.monotonic() < deadline: time.sleep(.01)
+        assert clients and all(c.conn is None for c in clients)
+    finally: pool.shutdown()
+
+@pytest.mark.parametrize('second_failure', [False, True])
+def test_listing_tls_recovery_is_bounded(second_failure):
+    import ssl, time
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from PySide6.QtWidgets import QApplication
+    from aetherftp import Session
+    app = QApplication.instance() or QApplication([])
+    session = Session(logging.getLogger('listing-retry'))
+    session.connected = True
+    session.connection_args = ('example.invalid',21,'test','secret','FTPES')
+    session.client.listdir = Mock(side_effect=[ssl.SSLError('decode error'), ssl.SSLError('decode error') if second_failure else []])
+    session.client.connect = Mock()
+    session.client.close = Mock()
+    try:
+        session.refresh_remote()
+        deadline = time.monotonic() + 2
+        while session.pending and time.monotonic() < deadline: session.pump(); time.sleep(.01)
+        assert session.pending == 0
+        assert session.client.listdir.call_count == 2
+        session.client.connect.assert_called_once_with(*session.connection_args)
+    finally:
+        session.timer.stop(); session.jobs.put(None); session.worker.join(1)
+
+def test_fresh_queue_retains_active_work_and_event_history():
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from PySide6.QtWidgets import QApplication, QTreeWidgetItem, QProgressBar
+    from aetherftp import Session
+    app = QApplication.instance() or QApplication([])
+    session = Session(logging.getLogger('fresh-queue'))
+    try:
+        session.transfers.addTopLevelItem(QTreeWidgetItem(['Previous file', 'Completed']))
+        session.progress_bars[0] = QProgressBar()
+        session.log.appendPlainText('Previous upload completed')
+        session.pending = 1; session.clear_finished_queue()
+        assert session.transfers.topLevelItemCount() == 1
+        session.pending = 0; session.events.put(('state',0,'Completed')); session.clear_finished_queue()
+        assert session.transfers.topLevelItemCount() == 1
+        session.events.get_nowait(); session.clear_finished_queue()
+        assert session.transfers.topLevelItemCount() == 0 and not session.progress_bars
+        assert 'Previous upload completed' in session.log.toPlainText()
+    finally:
+        session.timer.stop(); session.jobs.put(None); session.worker.join(1)
