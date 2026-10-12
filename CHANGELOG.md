@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1 — 2026-10-12
+
+- Build folder upload queues incrementally with bounded UI work per tick.
+- Limit event processing per tick so progress/log backlogs cannot monopolize the GUI.
+- Refresh remote files once after a folder batch instead of once per uploaded file.
+- Bound the visible Event Log to 1,000 lines while retaining persistent logging.
+- Add a 1,000-file queue stress test that checks GUI timer responsiveness and a single final refresh.
+
+
 ## 0.5.0 — 2026-10-11
 
 - Upload folders recursively, preserving nested paths and empty directories.

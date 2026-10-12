@@ -1,4 +1,4 @@
-# AetherFTP 0.5.0
+# AetherFTP 0.5.1
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -18,7 +18,7 @@ python -m venv .venv
 
 ## Connections and transfers
 
-Each connection tab has independent credentials, paths and a sequential transfer queue. File panes expand with the window. Use **Transfer activity** at the bottom to show or hide the queue and event log. Select multiple files to upload or download. Drag selected files or folders from the local pane, or drop them from Explorer, onto the remote pane to upload into its current directory. Folder uploads preserve their name, nested contents and empty directories; each file has its own queue progress bar. Folder scanning happens in the background. Links and junctions are skipped, with a count in the Event Log. Recursive downloads, queue cancellation and persisted queues are future work.
+Each connection tab has independent credentials, paths and a sequential transfer queue. File panes expand with the window. Use **Transfer activity** at the bottom to show or hide the queue and event log. Select multiple files to upload or download. Drag selected files or folders from the local pane, or drop them from Explorer, onto the remote pane to upload into its current directory. Folder uploads preserve their name, nested contents and empty directories; each file has its own queue progress bar. Folder scanning happens in the background, queue rows are added incrementally, and the remote pane refreshes once after the batch. Links and junctions are skipped, with a count in the Event Log. Recursive downloads, queue cancellation and persisted queues are future work.
 
 Enable **Resume partial files** only when the destination contains the exact initial bytes of the same source file. Resume verifies sizes but does not verify file identity or hashes. Upload resume requires an existing remote file. FTP servers must support SIZE and REST; unsupported resume fails without a fallback overwrite. Failed transfers remain visible and can be requeued using the file selection controls. Finish queued work before disconnecting or closing a tab.
 
@@ -40,7 +40,7 @@ Protocol behavior is covered by isolated adapter tests. Real-server interoperabi
 
 Queue rows show a purple/cyan bar with centered percentage and live transfer rate in decimal MB/s (1 MB = 1,000,000 bytes). The queue opens when transfers are added; it can still be collapsed. Completed rows show the average transfer rate. Unknown total sizes display a dash instead of a percentage until completion. Resume rates count only newly transferred bytes.
 
-The Event log tab shows each file’s start/completion/failure time, elapsed seconds, transferred bytes and average MB/s. Transfer timing records in persistent JSON logs contain UTC timestamps and transfer IDs without filenames, paths, hosts or credentials. Connection diagnostics can include redacted server error replies. The row tooltip contains the matching transfer ID. Timing excludes waiting in the queue and includes protocol setup for that transfer. Failed transfers retain their partial progress and timing record.
+The Event log tab shows each file’s start/completion/failure time, elapsed seconds, transferred bytes and average MB/s. Its visible history keeps the latest 1,000 lines; persistent rotating logs continue separately. Transfer timing records in persistent JSON logs contain UTC timestamps and transfer IDs without filenames, paths, hosts or credentials. Connection diagnostics can include redacted server error replies. The row tooltip contains the matching transfer ID. Timing excludes waiting in the queue and includes protocol setup for that transfer. Failed transfers retain their partial progress and timing record.
 
 ## FTPES connection URLs
 

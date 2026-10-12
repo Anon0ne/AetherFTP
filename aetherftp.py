@@ -9,6 +9,9 @@ import queue
 import sys
 import threading
 import uuid
+import time
+from collections import deque
+from itertools import chain
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QTimer, QMimeData, QUrl
@@ -105,6 +108,7 @@ class Session(QWidget):
         self.client.on_status = lambda message: self.events.put(('connection_step', message, datetime.now(timezone.utc).isoformat()))
         self.connection_secrets = ()
         self.pending = 0
+        self.upload_batches = deque()
         self.progress_bars = {}
         self.connected = False
         self.local_path = Path.home()
@@ -178,8 +182,11 @@ class Session(QWidget):
         self.transfers.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.activity.addTab(self.transfers, 'Queue')
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.activity.addTab(self.log, 'Event log')
+        self.log.setMaximumBlockCount(1000)
         layout.addWidget(self.activity); self.activity.hide()
-        self.timer = QTimer(self); self.timer.timeout.connect(self.pump); self.timer.start(50)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.pump); self.timer.start(16)
+        self.queue_timer = QTimer(self); self.queue_timer.setInterval(10)
+        self.queue_timer.timeout.connect(self.dispatch_upload_batch)
         self.refresh_local()
     def toggle_activity(self, visible):
         self.activity.setVisible(visible)
@@ -207,8 +214,12 @@ class Session(QWidget):
                 self.events.put(('error', type(exc).__name__, row, stage, message))
             finally: self.events.put(('done',))
     def pump(self):
-        while not self.events.empty():
-            event = self.events.get_nowait()
+        deadline = time.monotonic() + 0.008
+        processed = 0
+        while processed < 100 and time.monotonic() < deadline:
+            try: event = self.events.get_nowait()
+            except queue.Empty: break
+            processed += 1
             if event[0] == 'done': self.pending -= 1
             elif event[0] == 'connection_step':
                 self.log.appendPlainText(event[2] + '  ' + event[1])
@@ -330,7 +341,7 @@ class Session(QWidget):
         path, directory = item.data(0, Qt.ItemDataRole.UserRole)
         if directory:
             getattr(self, side + '_display').setText(path); self.navigate(side)
-    def enqueue_transfer(self, direction, source, dest, resume_override=None):
+    def enqueue_transfer(self, direction, source, dest, resume_override=None, refresh=True):
         if not self.connected: self.status.setText('Connect to a server first'); return
         resume = self.resume.isChecked() if resume_override is None else resume_override
         row = self.transfers.topLevelItemCount()
@@ -370,7 +381,8 @@ class Session(QWidget):
         def completed(summary):
             bar.setProperty('average_text', f'{summary["average_mbps"]:.2f} MB/s')
             self.set_transfer_state(row, 'Completed')
-            self.refresh_local() if direction == 'Download' else self.refresh_remote()
+            if refresh:
+                self.refresh_local() if direction == 'Download' else self.refresh_remote()
         self.submit(transfer, completed, row, operation=direction)
     def upload_paths(self, paths):
         if not self.connected:
@@ -389,14 +401,33 @@ class Session(QWidget):
             self.activity_toggle.setChecked(True); self.activity.setCurrentIndex(0)
             self.status.setText(f'Queued {len(directories)} folders and {len(files)} files; skipped {skipped} links')
             self.log.appendPlainText(f'Upload destination: {target}\nPlanning complete: {len(directories)} folders, {len(files)} files, {skipped} links skipped.')
-            for directory in directories:
-                row = self.transfers.topLevelItemCount()
-                self.transfers.addTopLevelItem(QTreeWidgetItem(['Create folder: ' + directory, 'Queued']))
-                self.submit(lambda p=directory: self.client.ensure_directory(p), row=row, operation='Create remote folder')
-            for local, remote in files:
-                self.enqueue_transfer('Upload', local, remote, resume_override=resume)
-            if not files: self.submit(lambda: None, lambda _: self.refresh_remote())
+            actions = chain(((None, directory) for directory in directories), iter(files))
+            self.upload_batches.append({'actions': iter(actions), 'resume': resume})
+            # Keep the tab alive until its remaining plan has been dispatched.
+            self.pending += 1
+            self.queue_timer.start()
         self.submit(lambda: plan_uploads(paths, target), ready, operation='Upload planning')
+    def dispatch_upload_batch(self):
+        if not self.upload_batches:
+            self.queue_timer.stop(); return
+        batch = self.upload_batches[0]
+        deadline = time.monotonic() + 0.008
+        count = 0
+        while count < 20 and time.monotonic() < deadline:
+            try: local, remote = next(batch['actions'])
+            except StopIteration:
+                self.upload_batches.popleft()
+                self.pending -= 1
+                self.submit(lambda: None, lambda _: self.refresh_remote())
+                if not self.upload_batches: self.queue_timer.stop()
+                return
+            if local is None:
+                row = self.transfers.topLevelItemCount()
+                self.transfers.addTopLevelItem(QTreeWidgetItem(['Create folder: ' + remote, 'Queued']))
+                self.submit(lambda p=remote: self.client.ensure_directory(p), row=row, operation='Create remote folder')
+            else:
+                self.enqueue_transfer('Upload', local, remote, resume_override=batch['resume'], refresh=False)
+            count += 1
     def upload_selected(self):
         self.upload_paths([Path(i.data(0, Qt.ItemDataRole.UserRole)[0]) for i in self.local_tree.selectedItems() if i.text(0) != '..'])
     def download_selected(self):
@@ -518,7 +549,7 @@ class App(QMainWindow):
         session = self.tabs.widget(index)
         if session.pending:
             QMessageBox.warning(self, 'Queue active', 'Wait for queued operations before closing this tab.'); return
-        session.timer.stop(); session.jobs.put(None); session.worker.join(timeout=1)
+        session.timer.stop(); session.queue_timer.stop(); session.jobs.put(None); session.worker.join(timeout=1)
         self.tabs.removeTab(index); session.deleteLater()
     def closeEvent(self, event):
         if any(self.tabs.widget(i).pending for i in range(self.tabs.count())):

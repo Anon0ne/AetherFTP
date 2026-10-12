@@ -431,3 +431,34 @@ def test_remote_drop_accepts_folder_url(tmp_path):
     tree.dropEvent(event)
     upload.assert_called_once_with([folder]); assert event.isAccepted()
     assert event.dropAction() == Qt.DropAction.CopyAction
+
+
+def test_large_folder_queue_keeps_gui_timer_running(monkeypatch):
+    import time
+    import aetherftp
+    from PySide6.QtWidgets import QApplication,QMessageBox
+    from PySide6.QtCore import QTimer
+    os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
+    session=aetherftp.Session(logging.getLogger('large-folder-test')); session.connected=True
+    plan=(['/files/project'],[(f'/local/file-{i}.txt',f'/files/project/file-{i}.txt') for i in range(1000)],0)
+    monkeypatch.setattr(aetherftp,'plan_uploads',lambda *args:plan)
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(session.client,'ensure_directory',lambda path:None)
+    def upload(local,remote,callback,resume): callback(0,1); callback(1,1)
+    monkeypatch.setattr(session.client,'upload',upload)
+    refresh=Mock(); monkeypatch.setattr(session,'refresh_remote',refresh)
+    seen=[]; heartbeat=QTimer(); heartbeat.setInterval(5)
+    heartbeat.timeout.connect(lambda:seen.append(session.transfers.topLevelItemCount())); heartbeat.start()
+    try:
+        session.upload_paths(['/local/project'])
+        deadline=time.monotonic()+30
+        while session.pending and time.monotonic()<deadline:
+            app.processEvents(); time.sleep(.001)
+        assert session.pending==0
+        assert session.transfers.topLevelItemCount()==1001
+        assert any(0<count<1001 for count in seen), 'GUI timer must run while rows are still being created'
+        assert refresh.call_count==1, 'Folder upload must refresh once, not after every file'
+        assert session.log.document().blockCount()<=1000
+        assert not session.upload_batches and not session.queue_timer.isActive()
+    finally:
+        heartbeat.stop(); session.timer.stop(); session.queue_timer.stop(); session.jobs.put(None); session.worker.join(3)
