@@ -1,4 +1,4 @@
-# AetherFTP 0.5.1
+# AetherFTP 0.6.0
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -18,7 +18,7 @@ python -m venv .venv
 
 ## Connections and transfers
 
-Each connection tab has independent credentials, paths and a sequential transfer queue. File panes expand with the window. Use **Transfer activity** at the bottom to show or hide the queue and event log. Select multiple files to upload or download. Drag selected files or folders from the local pane, or drop them from Explorer, onto the remote pane to upload into its current directory. Folder uploads preserve their name, nested contents and empty directories; each file has its own queue progress bar. Folder scanning happens in the background, queue rows are added incrementally, and the remote pane refreshes once after the batch. Links and junctions are skipped, with a count in the Event Log. Recursive downloads, queue cancellation and persisted queues are future work.
+Each connection tab has independent credentials and paths. A shared scheduler controls concurrent transfers across tabs. File panes expand with the window. Use **Transfer activity** at the bottom to show or hide the queue and event log. Select multiple files to upload or download. Drag selected files or folders from the local pane, or drop them from Explorer, onto the remote pane to upload into its current directory. Folder uploads preserve their name, nested contents and empty directories; each file has its own queue progress bar. Folder scanning happens in the background, queue rows are added incrementally, and the remote pane refreshes once after the batch. Links and junctions are skipped, with a count in the Event Log. Recursive downloads, queue cancellation and persisted queues are future work.
 
 Enable **Resume partial files** only when the destination contains the exact initial bytes of the same source file. Resume verifies sizes but does not verify file identity or hashes. Upload resume requires an existing remote file. FTP servers must support SIZE and REST; unsupported resume fails without a fallback overwrite. Failed transfers remain visible and can be requeued using the file selection controls. Finish queued work before disconnecting or closing a tab.
 
@@ -59,3 +59,11 @@ Session reuse solves compatibility with servers that require it, but does not by
 Select a folder and click Upload, or drag it from the local pane/Explorer onto the remote pane. Confirm the current remote destination. AetherFTP queues directory creation first, then contained files with individual progress and timings. Existing directories are accepted only after verifying they are directories. Existing matching files can be replaced after the batch confirmation; unrelated remote files are retained. Resume remains opt-in and requires existing matching partial files; leave it off for a new folder upload.
 
 The Event Log shows the remote destination for every attempted transfer. A `553 Could not create file` response is a server rejection of file creation, separate from folder selection: check the chosen remote directory, account write permissions, quota/free space and filename conflicts. The app keeps creation and transfer failures visible.
+
+## Network settings
+
+Open **Menu → Settings** to choose concurrent uploads and concurrent downloads independently (1–8 each). Limits apply across all tabs in that application window. Default limits are one upload and one download. Each worker uses its own reusable FTP/FTPES/FTPS/SFTP connection; browsing retains a separate connection per tab. The server must permit these simultaneous logins. Conflicting writes to the same destination are serialized. Folder files wait until their remote directory creation jobs have finished.
+
+Set upload and download bandwidth separately in decimal MB/s; **Unlimited** (0) disables that limit. Each directional limit is shared across all transfers in that window. Pacing occurs at transfer blocks, so short buffering bursts are possible. Bandwidth changes apply immediately. Increasing concurrency starts additional eligible work; lowering it lets existing transfers finish before applying the lower limit to new files.
+
+Preferences are stored without credentials in `%APPDATA%\AetherFTP\settings.json` and restored at startup. **Menu → Exit** uses the existing queue-active guard.

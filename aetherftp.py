@@ -19,7 +19,8 @@ from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTabWidget,
     QSplitter, QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
-    QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView, QProgressBar, QAbstractItemView)
+    QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView, QProgressBar, QAbstractItemView,
+    QMenu, QSpinBox, QDoubleSpinBox)
 from server_book import (load_profiles, save_profiles, encrypt_password,
     profile_password, windows_vault, STORE)
 from transfer_client import Client
@@ -28,18 +29,20 @@ from transfer_stats import TransferStats
 from connection_url import parse_connection_url
 from diagnostics import redact_message
 from upload_plan import plan_uploads
+from transfer_pool import TransferPool
+from user_settings import DEFAULTS, load_settings, save_settings
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
 QLabel, QCheckBox { background: transparent; }
 QWidget#panel, QWidget#connectionBar { background: #151d2c; border-radius: 5px; }
-QLineEdit, QComboBox { background: #202b3c; border: 1px solid #39465c; padding: 5px; border-radius: 3px; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: #202b3c; border: 1px solid #39465c; padding: 5px; border-radius: 3px; }
 QTreeWidget, QPlainTextEdit { background: #151d2c; border: none; }
 QTreeWidget::item { padding: 4px 2px; }
 QPushButton { background: #202b3c; border: 1px solid #39465c; padding: 6px 12px; border-radius: 3px; }
 QPushButton#primary { background: #a78bfa; color: #0b101b; border: none; font-weight: 600; }
 QPushButton:hover, QTabBar::tab:selected { background: #493b75; color: #e4eaf5; }
-QLineEdit:focus, QComboBox:focus, QPushButton:focus, QTreeWidget:focus { border: 1px solid #38bdf8; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPushButton:focus, QTreeWidget:focus { border: 1px solid #38bdf8; }
 QHeaderView::section { background: #202b3c; color: #9caac1; border: none; padding: 6px; }
 QTabBar::tab { background: #151d2c; padding: 5px 16px; margin-right: 3px; }
 QTabWidget::pane { border: none; }
@@ -98,8 +101,8 @@ class FileTree(QTreeWidget):
 
 
 class Session(QWidget):
-    """One serialized worker per connection; widgets only change on the GUI thread."""
-    def __init__(self, logger):
+    """Serialized browsing plus isolated transfer connections; GUI changes stay on the GUI thread."""
+    def __init__(self, logger, pool=None):
         super().__init__()
         self.logger = logger
         self.client = Client()
@@ -107,6 +110,9 @@ class Session(QWidget):
         self.events = queue.Queue()
         self.client.on_status = lambda message: self.events.put(('connection_step', message, datetime.now(timezone.utc).isoformat()))
         self.connection_secrets = ()
+        self.connection_args = None
+        self.owns_pool = pool is None
+        self.transfer_pool = pool or TransferPool(Client, lambda client, ensure, job: job[0].run_transfer_job(client, ensure, job[1:]))
         self.pending = 0
         self.upload_batches = deque()
         self.progress_bars = {}
@@ -199,20 +205,31 @@ class Session(QWidget):
         while True:
             job = self.jobs.get()
             if job is None:
-                self.client.close(); return
-            action, success, row, operation = job
-            try:
-                if operation != 'Operation': self.events.put(('operation_status', operation, 'Started'))
-                if row is not None: self.events.put(('state', row, 'Running'))
-                result = action()
-                self.events.put(('success', success, result, row))
-                if operation != 'Operation': self.events.put(('operation_status', operation, 'Completed'))
-            except Exception as exc:
-                # Real replies are useful, but authentication values must never enter logs.
-                message = redact_message(str(exc), self.connection_secrets)
-                stage = self.client.connection_stage if operation == 'Connect' else operation
-                self.events.put(('error', type(exc).__name__, row, stage, message))
-            finally: self.events.put(('done',))
+                self.client.close()
+                if self.owns_pool: self.transfer_pool.shutdown()
+                else: self.transfer_pool.close_idle_connections()
+                return
+            self.run_job(*job)
+    def run_job(self, action, success, row, operation, on_finished=None):
+        try:
+            if operation != 'Operation': self.events.put(('operation_status', operation, 'Started'))
+            if row is not None: self.events.put(('state', row, 'Running'))
+            result = action()
+            self.events.put(('success', success, result, row))
+            if operation != 'Operation': self.events.put(('operation_status', operation, 'Completed'))
+        except Exception as exc:
+            message = redact_message(str(exc), self.connection_secrets)
+            stage = self.client.connection_stage if operation == 'Connect' else operation
+            self.events.put(('error', type(exc).__name__, row, stage, message))
+        finally: self.events.put(('done', on_finished))
+    def run_transfer_job(self, client, ensure, job):
+        action, success, row, operation, on_finished = job
+        client.on_status = lambda message: self.events.put(('connection_step', f'{operation} #{row + 1}: {message}', datetime.now(timezone.utc).isoformat()))
+        def execute():
+            try: return action(client, ensure)
+            except Exception:
+                client.close(); raise
+        self.run_job(execute, success, row, operation, on_finished)
     def pump(self):
         deadline = time.monotonic() + 0.008
         processed = 0
@@ -220,7 +237,9 @@ class Session(QWidget):
             try: event = self.events.get_nowait()
             except queue.Empty: break
             processed += 1
-            if event[0] == 'done': self.pending -= 1
+            if event[0] == 'done':
+                self.pending -= 1
+                if len(event) > 1 and event[1]: event[1]()
             elif event[0] == 'connection_step':
                 self.log.appendPlainText(event[2] + '  ' + event[1])
                 self.logger.info(json.dumps({'event': 'connection_step', 'timestamp': event[2], 'stage': event[1]}))
@@ -297,6 +316,7 @@ class Session(QWidget):
             self.status.setText('Enter a host and port between 1 and 65535'); return
         args = (self.host.text().strip(), port, self.user.text(), self.password.text(), self.protocol.currentText())
         self.connection_secrets = tuple(value for value in args[:1] + args[2:4] if value)
+        self.connection_args = args
         self.connected = False
         self.status.setText('CONNECTING…')
         self.submit(lambda: self.client.connect(*args), self.on_connected, operation='Connect')
@@ -306,7 +326,9 @@ class Session(QWidget):
     def disconnect(self):
         if self.pending: self.status.setText('Wait for queued operations before disconnecting'); return
         self.connected = False
-        self.submit(self.client.close, lambda _: self.status.setText('OFFLINE'), operation='Disconnect')
+        def close_connections():
+            self.client.close(); self.transfer_pool.close_idle_connections()
+        self.submit(close_connections, lambda _: self.status.setText('OFFLINE'), operation='Disconnect')
     def refresh_local(self):
         try:
             entries = [('..', True, 0, str(self.local_path.parent))]
@@ -341,7 +363,7 @@ class Session(QWidget):
         path, directory = item.data(0, Qt.ItemDataRole.UserRole)
         if directory:
             getattr(self, side + '_display').setText(path); self.navigate(side)
-    def enqueue_transfer(self, direction, source, dest, resume_override=None, refresh=True):
+    def enqueue_transfer(self, direction, source, dest, resume_override=None, refresh=True, barrier=None, on_finished=None):
         if not self.connected: self.status.setText('Connect to a server first'); return
         resume = self.resume.isChecked() if resume_override is None else resume_override
         row = self.transfers.topLevelItemCount()
@@ -360,17 +382,22 @@ class Session(QWidget):
                 str(dest) if direction == 'Upload' else str(source)))
         stats = None
         last_emit = [0.0]
+        previous_bytes = [None]
         def progress(done, total):
+            if previous_bytes[0] is not None:
+                self.transfer_pool.bandwidth[direction].consume(max(0, done - previous_bytes[0]))
+            previous_bytes[0] = done
             percent, rate = stats.update(done, total)
             now = stats.clock()
             if now - last_emit[0] >= 0.1 or done == total:
                 self.events.put(('progress', row, percent, rate)); last_emit[0] = now
-        method = self.client.upload if direction == 'Upload' else self.client.download
-        def transfer():
+        def transfer(client, ensure_connected):
             nonlocal stats
             stats = TransferStats()
             record('transfer_started')
             try:
+                ensure_connected()
+                method = client.upload if direction == 'Upload' else client.download
                 method(str(source), str(dest), progress, resume=resume)
             except Exception as exc:
                 record('transfer_failed', error_type=type(exc).__name__, **stats.summary())
@@ -383,7 +410,11 @@ class Session(QWidget):
             self.set_transfer_state(row, 'Completed')
             if refresh:
                 self.refresh_local() if direction == 'Download' else self.refresh_remote()
-        self.submit(transfer, completed, row, operation=direction)
+        self.pending += 1
+        resource = posixpath.normpath(str(dest)) if direction == 'Upload' else os.path.normcase(os.path.abspath(str(dest)))
+        scope = self.connection_args[:3] + self.connection_args[4:] if direction == 'Upload' else ()
+        self.transfer_pool.submit(direction, (direction, scope, resource), self.connection_args,
+            (self, transfer, completed, row, direction, on_finished), barrier=barrier)
     def upload_paths(self, paths):
         if not self.connected:
             self.status.setText('Connect to a server first'); return
@@ -402,7 +433,9 @@ class Session(QWidget):
             self.status.setText(f'Queued {len(directories)} folders and {len(files)} files; skipped {skipped} links')
             self.log.appendPlainText(f'Upload destination: {target}\nPlanning complete: {len(directories)} folders, {len(files)} files, {skipped} links skipped.')
             actions = chain(((None, directory) for directory in directories), iter(files))
-            self.upload_batches.append({'actions': iter(actions), 'resume': resume})
+            self.upload_batches.append({'actions': iter(actions), 'resume': resume,
+                'remaining': len(files), 'barrier': threading.Event(), 'directories_ready': False,
+                'dispatched': False, 'finished': False})
             # Keep the tab alive until its remaining plan has been dispatched.
             self.pending += 1
             self.queue_timer.start()
@@ -417,8 +450,12 @@ class Session(QWidget):
             try: local, remote = next(batch['actions'])
             except StopIteration:
                 self.upload_batches.popleft()
-                self.pending -= 1
-                self.submit(lambda: None, lambda _: self.refresh_remote())
+                batch['dispatched'] = True
+                def release(b=batch):
+                    b['barrier'].set(); self.transfer_pool.wake()
+                def ready(_value, b=batch):
+                    b['directories_ready'] = True; self.finish_upload_batch(b)
+                self.submit(release, ready)
                 if not self.upload_batches: self.queue_timer.stop()
                 return
             if local is None:
@@ -426,8 +463,15 @@ class Session(QWidget):
                 self.transfers.addTopLevelItem(QTreeWidgetItem(['Create folder: ' + remote, 'Queued']))
                 self.submit(lambda p=remote: self.client.ensure_directory(p), row=row, operation='Create remote folder')
             else:
-                self.enqueue_transfer('Upload', local, remote, resume_override=batch['resume'], refresh=False)
+                def file_finished(b=batch):
+                    b['remaining'] -= 1; self.finish_upload_batch(b)
+                self.enqueue_transfer('Upload', local, remote, resume_override=batch['resume'], refresh=False,
+                                      barrier=batch['barrier'], on_finished=file_finished)
             count += 1
+    def finish_upload_batch(self, batch):
+        if batch['dispatched'] and batch['directories_ready'] and batch['remaining'] == 0 and not batch['finished']:
+            batch['finished'] = True; self.pending -= 1
+            self.refresh_remote()
     def upload_selected(self):
         self.upload_paths([Path(i.data(0, Qt.ItemDataRole.UserRole)[0]) for i in self.local_tree.selectedItems() if i.text(0) != '..'])
     def download_selected(self):
@@ -528,9 +572,40 @@ class ServerBook(QDialog):
         s.navigate('local'); self.accept()
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle('AetherFTP Settings'); self.resize(440, 270)
+        layout = QFormLayout(self)
+        self.fields = {}
+        for key, label in [('uploads', 'Concurrent uploads'), ('downloads', 'Concurrent downloads')]:
+            spin = QSpinBox(); spin.setRange(1, 8); spin.setValue(parent.settings[key])
+            self.fields[key] = spin; layout.addRow(label, spin)
+        for key, label in [('upload_mbps', 'Upload bandwidth (MB/s)'), ('download_mbps', 'Download bandwidth (MB/s)')]:
+            spin = QDoubleSpinBox(); spin.setRange(0, 10000); spin.setDecimals(2)
+            spin.setSpecialValueText('Unlimited'); spin.setValue(parent.settings[key])
+            self.fields[key] = spin; layout.addRow(label, spin)
+        note = QLabel('Limits apply across all tabs.\nLowering concurrency lets active files finish.\nBandwidth limits apply immediately; 0 means unlimited.')
+        note.setWordWrap(True); layout.addRow(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(self.reject); buttons.accepted.connect(self.save)
+        layout.addRow(buttons)
+    def save(self):
+        values = {key: field.value() for key, field in self.fields.items()}
+        try: save_settings(values)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Settings not saved', type(exc).__name__); return
+        self.parent().settings = values
+        self.parent().transfer_pool.configure(values)
+        self.accept()
+
+
 class App(QMainWindow):
     def __init__(self, logger):
         super().__init__(); self.logger = logger
+        self.settings = load_settings()
+        self.transfer_pool = TransferPool(Client, lambda client, ensure, job: job[0].run_transfer_job(client, ensure, job[1:]))
+        self.transfer_pool.configure(self.settings)
         self.setWindowTitle('AetherFTP ' + __version__); self.resize(1180, 760); self.setMinimumSize(960, 600)
         root = QWidget(); layout = QVBoxLayout(root); layout.setContentsMargins(20, 16, 20, 16); layout.setSpacing(10); self.setCentralWidget(root)
         header = QHBoxLayout()
@@ -538,13 +613,20 @@ class App(QMainWindow):
         caption = QLabel('ENGINEERING FILE TRANSFER'); caption.setObjectName('muted'); header.addWidget(caption)
         header.addStretch()
         credit = QLabel('Built by Anon0ne'); credit.setObjectName('muted'); header.addWidget(credit)
+        self.menu_button = QPushButton('Menu ▾')
+        menu = QMenu(self.menu_button)
+        menu.addAction('Settings', self.open_settings)
+        menu.addAction('Exit', self.close)
+        self.menu_button.setMenu(menu); header.addWidget(self.menu_button)
         layout.addLayout(header)
         self.tabs = QTabWidget(); self.tabs.setTabsClosable(True); self.tabs.tabCloseRequested.connect(self.close_tab)
         button = QPushButton('+ New tab'); button.clicked.connect(self.add_tab)
         self.tabs.setCornerWidget(button, Qt.Corner.TopRightCorner); layout.addWidget(self.tabs, 1)
         self.add_tab()
     def add_tab(self):
-        self.tabs.setCurrentIndex(self.tabs.addTab(Session(self.logger), 'Connection ' + str(self.tabs.count() + 1)))
+        self.tabs.setCurrentIndex(self.tabs.addTab(Session(self.logger, self.transfer_pool), 'Connection ' + str(self.tabs.count() + 1)))
+    def open_settings(self):
+        SettingsDialog(self).exec()
     def close_tab(self, index):
         session = self.tabs.widget(index)
         if session.pending:
@@ -555,6 +637,7 @@ class App(QMainWindow):
         if any(self.tabs.widget(i).pending for i in range(self.tabs.count())):
             QMessageBox.warning(self, 'Queue active', 'Wait for queued operations before exiting.'); event.ignore(); return
         while self.tabs.count(): self.close_tab(0)
+        self.transfer_pool.shutdown()
         event.accept()
 
 

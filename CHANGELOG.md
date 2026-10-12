@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 — 2026-10-12
+
+- Add a Menu drop-down with Settings and Exit.
+- Persist separate upload/download concurrency limits (1–8) and aggregate MB/s bandwidth limits per Windows user.
+- Share transfer limits across tabs and use an independent, reusable connection for each active worker.
+- Apply bandwidth changes immediately; lower concurrency after current files finish.
+- Preserve folder creation dependencies, per-file progress, failure accounting and one final folder refresh.
+- Serialize conflicting destination writes and retain responsive queue batching.
+
+
 ## 0.5.1 — 2026-10-12
 
 - Build folder upload queues incrementally with bounded UI work per tick.

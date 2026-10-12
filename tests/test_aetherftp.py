@@ -172,6 +172,7 @@ def test_transfer_bars_and_timing_events(failure, monkeypatch):
     output = io.StringIO(); logger = logging.getLogger('transfer-test-' + str(failure))
     handler = logging.StreamHandler(output); logger.addHandler(handler); logger.setLevel(logging.INFO)
     session = Session(logger); session.connected = True
+    use_mock_transfer_client(session, monkeypatch)
     session.connection_secrets = ('secret', 'private host')
     monkeypatch.setattr(session, 'refresh_remote', lambda: None)
     ready = threading.Event(); release = threading.Event()
@@ -384,6 +385,7 @@ def test_gui_queues_folder_creation_before_files(tmp_path,monkeypatch):
     os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
     source=tmp_path/'project'; (source/'empty').mkdir(parents=True); (source/'child.txt').write_bytes(b'data')
     session=Session(logging.getLogger('folder-test')); session.connected=True; session.remote_path='/files'
+    use_mock_transfer_client(session, monkeypatch)
     calls=[]
     monkeypatch.setattr(QMessageBox,'question',lambda *args: QMessageBox.StandardButton.Yes)
     monkeypatch.setattr(session.client,'ensure_directory',lambda path:calls.append(('mkdir',path)))
@@ -440,6 +442,7 @@ def test_large_folder_queue_keeps_gui_timer_running(monkeypatch):
     from PySide6.QtCore import QTimer
     os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
     session=aetherftp.Session(logging.getLogger('large-folder-test')); session.connected=True
+    use_mock_transfer_client(session, monkeypatch)
     plan=(['/files/project'],[(f'/local/file-{i}.txt',f'/files/project/file-{i}.txt') for i in range(1000)],0)
     monkeypatch.setattr(aetherftp,'plan_uploads',lambda *args:plan)
     monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Yes)
@@ -462,3 +465,154 @@ def test_large_folder_queue_keeps_gui_timer_running(monkeypatch):
         assert not session.upload_batches and not session.queue_timer.isActive()
     finally:
         heartbeat.stop(); session.timer.stop(); session.queue_timer.stop(); session.jobs.put(None); session.worker.join(3)
+
+
+
+def use_mock_transfer_client(session, monkeypatch):
+    session.connection_args = ('example.invalid',21,'test','secret','FTP')
+    session.transfer_pool.factory = lambda: session.client
+    def connect(*args): session.client.conn = Mock()
+    monkeypatch.setattr(session.client, 'connect', connect)
+
+
+def test_transfer_pool_honors_direction_limits_and_uses_separate_clients():
+    from transfer_pool import TransferPool
+    from user_settings import DEFAULTS
+    import threading
+    gate=threading.Event(); first=threading.Event(); done=threading.Event(); lock=threading.Lock()
+    active={'Upload':0,'Download':0}; peaks=active.copy(); started=[]; finished=[]; clients=[]
+    class FakeClient:
+        def __init__(self): self.conn=None; clients.append(self)
+        def connect(self,*args): self.conn=object()
+        def close(self): self.conn=None
+    def run(client,ensure,job):
+        ensure(); kind=job[0]
+        with lock:
+            active[kind]+=1; peaks[kind]=max(peaks[kind],active[kind]); started.append((job,client))
+            if len(started)==3: first.set()
+        gate.wait(3)
+        with lock:
+            active[kind]-=1; finished.append(job)
+            if len(finished)==8: done.set()
+    pool=TransferPool(FakeClient,run); pool.configure(DEFAULTS|{'uploads':2,'downloads':1})
+    try:
+        for kind,count in [('Upload',5),('Download',3)]:
+            for index in range(count): pool.submit(kind,(kind,index),('example.invalid',21,'test','secret','FTP'),(kind,index))
+        assert first.wait(2)
+        assert active=={'Upload':2,'Download':1}
+        assert len({id(client) for _,client in started})==3
+        gate.set(); assert done.wait(3)
+        assert peaks=={'Upload':2,'Download':1}
+        assert len(clients)==3, 'Connections must be reused by fixed worker slots'
+    finally: gate.set(); pool.shutdown()
+    assert all(client.conn is None for client in clients)
+
+
+def test_bandwidth_limit_is_shared_and_live_changes_release_waiters():
+    from transfer_pool import BandwidthLimiter
+    import threading
+    import time
+    limiter=BandwidthLimiter(.5)
+    start=time.monotonic()
+    threads=[threading.Thread(target=limiter.consume,args=(25000,)) for _ in range(2)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join(2)
+    assert all(not thread.is_alive() for thread in threads)
+    assert time.monotonic()-start >= .075
+    limiter.set_limit(.0001)
+    thread=threading.Thread(target=limiter.consume,args=(65536,)); thread.start()
+    limiter.set_limit(0); thread.join(1)
+    assert not thread.is_alive()
+
+
+def test_user_settings_roundtrip_and_validation(tmp_path,monkeypatch):
+    import user_settings
+    monkeypatch.setattr(user_settings,'SETTINGS',tmp_path/'settings.json')
+    values=user_settings.DEFAULTS|{'uploads':4,'downloads':2,'upload_mbps':1.25}
+    user_settings.save_settings(values); assert user_settings.load_settings()==values
+    for bad in [{'uploads':0},{'downloads':9},{'upload_mbps':float('nan')},{'download_mbps':-1}]:
+        with pytest.raises(ValueError): user_settings.save_settings(bad)
+    assert user_settings.load_settings()==values
+
+
+def test_parallel_folder_waits_for_directories_and_refreshes_after_failed_file(monkeypatch):
+    import threading
+    import time
+    import aetherftp
+    from PySide6.QtWidgets import QApplication,QMessageBox
+    from user_settings import DEFAULTS
+    os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
+    session=aetherftp.Session(logging.getLogger('parallel-folder')); session.connected=True
+    session.connection_args=('example.invalid',21,'test','secret','FTP')
+    session.transfer_pool.configure(DEFAULTS|{'uploads':4})
+    ready=threading.Event(); attempts=[]; violations=[]; lock=threading.Lock()
+    def mkdir(path):
+        time.sleep(.01)
+        if path=='/files/project/nested': ready.set()
+    class FakeClient:
+        def __init__(self): self.conn=None; self.on_status=None
+        def connect(self,*args): self.conn=object()
+        def close(self): self.conn=None
+        def upload(self,local,remote,callback,resume):
+            with lock:
+                if not ready.is_set(): violations.append(remote)
+                attempts.append(remote)
+            if remote.endswith('file-7'): raise RuntimeError('simulated failure')
+            callback(0,1); time.sleep(.002); callback(1,1)
+    session.transfer_pool.factory=FakeClient
+    plan=(['/files/project','/files/project/nested'],[(f'/local/file-{i}',f'/files/project/nested/file-{i}') for i in range(100)],0)
+    monkeypatch.setattr(aetherftp,'plan_uploads',lambda *args:plan)
+    monkeypatch.setattr(session.client,'ensure_directory',mkdir)
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Yes)
+    refresh=Mock(); monkeypatch.setattr(session,'refresh_remote',refresh)
+    try:
+        session.upload_paths(['/local/project'])
+        deadline=time.monotonic()+10
+        while session.pending and time.monotonic()<deadline:
+            app.processEvents(); time.sleep(.001)
+        assert session.pending==0 and len(attempts)==100 and not violations
+        assert refresh.call_count==1
+        assert any('Failed' in bar.format() for bar in session.progress_bars.values())
+    finally:
+        session.timer.stop(); session.queue_timer.stop(); session.jobs.put(None); session.worker.join(3)
+
+
+def test_menu_has_settings_and_exit_and_panel_has_all_controls():
+    from PySide6.QtWidgets import QApplication
+    from aetherftp import App,SettingsDialog
+    os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
+    window=App(logging.getLogger('settings-menu'))
+    assert [action.text() for action in window.menu_button.menu().actions()]==['Settings','Exit']
+    dialog=SettingsDialog(window)
+    assert set(dialog.fields)=={'uploads','downloads','upload_mbps','download_mbps'}
+    dialog.reject(); window.close(); app.processEvents()
+
+
+def test_duplicate_destinations_are_serialized_even_with_parallel_slots():
+    from transfer_pool import TransferPool
+    from user_settings import DEFAULTS
+    import threading
+    lock=threading.Lock(); release=threading.Event(); first=threading.Event(); done=threading.Event()
+    active=set(); violations=[]; finished=[]
+    class FakeClient:
+        conn=None
+        def connect(self,*args): self.conn=object()
+        def close(self): self.conn=None
+    def run(client,ensure,job):
+        ensure()
+        with lock:
+            if job in active: violations.append(job)
+            active.add(job)
+            if len(active)==2: first.set()
+        release.wait(3)
+        with lock:
+            active.remove(job); finished.append(job)
+            if len(finished)==3: done.set()
+    pool=TransferPool(FakeClient,run); pool.configure(DEFAULTS|{'uploads':2})
+    try:
+        for target in ['same','same','other']:
+            pool.submit('Upload',('Upload',target),('example.invalid',21,'test','secret','FTP'),target)
+        assert first.wait(2)
+        release.set(); assert done.wait(3)
+        assert not violations
+    finally: release.set(); pool.shutdown()
