@@ -8,6 +8,8 @@ This is a proposal, not a list of implemented features. FileZilla's documented c
 
 Start after publishing 0.1.0b: filename filters, paired local/remote bookmarks and synchronized browsing, followed by remote editing with change detection and explicit re-upload confirmation.
 
+Work started on `codex/next-release-file-tools`: filename include/exclude filters for both panes and recursive upload planning. This work is not included in the published 0.1.0b executable. Bookmarks, synchronized browsing and remote editing are the next steps.
+
 ## Reliable queue control
 
 1. Pause, cancel and retry individual transfers or whole batches, with explicit partial-file handling.

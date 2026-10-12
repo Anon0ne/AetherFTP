@@ -2,13 +2,15 @@
 import os
 from pathlib import Path
 import posixpath
+from file_filters import FileFilter
 
 
 def is_link(path):
     return path.is_symlink() or getattr(path, 'is_junction', lambda: False)()
 
 
-def plan_uploads(paths, remote_directory):
+def plan_uploads(paths, remote_directory, file_filter=None):
+    file_filter = file_filter or FileFilter()
     directories, files, skipped = [], [], 0
     seen_dirs, seen_files = set(), set()
     def add_directory(remote):
@@ -26,6 +28,8 @@ def plan_uploads(paths, remote_directory):
             skipped += 1; continue
         if not source.name:
             raise ValueError('Select a named folder instead of a filesystem root')
+        if not file_filter.allows(source.name, directory=source.is_dir()):
+            skipped += 1; continue
         target = posixpath.join(remote_directory, source.name)
         if source.is_file():
             add_file(source, target)
@@ -38,12 +42,12 @@ def plan_uploads(paths, remote_directory):
                 subdirs.sort(); names.sort()
                 for name in subdirs[:]:
                     child = root / name
-                    if is_link(child):
+                    if is_link(child) or not file_filter.allows(name, child.relative_to(source).as_posix(), directory=True):
                         skipped += 1; subdirs.remove(name)
                     else: add_directory(posixpath.join(remote, name))
                 for name in names:
                     child = root / name
-                    if is_link(child): skipped += 1
+                    if is_link(child) or not file_filter.allows(name, child.relative_to(source).as_posix()): skipped += 1
                     elif child.is_file(): add_file(child, posixpath.join(remote, name))
                     else: raise ValueError('Unsupported local filesystem entry')
         else:

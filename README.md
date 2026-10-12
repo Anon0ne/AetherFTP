@@ -75,3 +75,7 @@ Open **Transfer activity**, then drag the divider above it up or down. Queue and
 Transfer connections are reused during active batches and closed when the queue drains. Each connected tab retains its browsing connection. Server limits apply to all clients from your IP, so lower concurrency if the server returns 421. A TLS directory-listing failure triggers one reconnect attempt; certificate verification errors are never bypassed.
 
 See [ROADMAP.md](ROADMAP.md) for proposed features.
+
+## Next-release development
+
+On the next-release branch, **Menu → Filename filters** sets include/exclude glob patterns for the current tab. Separate patterns with semicolons. For example, include `*.txt; *.zip`, or exclude `build; __pycache__; *.pyc`. Matching is case-insensitive. Both file panes hide excluded entries, and recursive upload planning prunes excluded folders and files. Include patterns select files while keeping directories navigable; exclusion rules can also hide/prune directories. Filters reset when the tab is closed. The published 0.1.0b executable does not include these development features.

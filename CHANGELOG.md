@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Begin next-release file tools: per-tab filename include/exclude filters, with excluded folders pruned from upload plans.
+- Paired bookmarks, synchronized browsing and remote editing remain planned.
+
 ## 0.1.0b - 2026-10-12
 
 First public beta. Earlier 0.3-0.6 versions below were local development milestones.

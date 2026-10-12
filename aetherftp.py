@@ -32,6 +32,7 @@ from diagnostics import redact_message
 from upload_plan import plan_uploads
 from transfer_pool import TransferPool
 from user_settings import DEFAULTS, load_settings, save_settings
+from file_filters import FileFilter
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -153,6 +154,7 @@ class Session(QWidget):
         self.connected = False
         self.local_path = Path.home()
         self.remote_path = '/'
+        self.file_filter = FileFilter()
         self.url_filename = ''
         self.worker = threading.Thread(target=self.run_jobs, daemon=True)
         self.worker.start()
@@ -387,13 +389,13 @@ class Session(QWidget):
                 entries.append((p.name, p.is_dir(), p.stat().st_size, str(p)))
             self.fill(self.local_tree, entries); self.local_display.setText(str(self.local_path))
         except OSError: self.status.setText('Cannot read local directory')
-    @staticmethod
-    def fill(tree, entries):
+    def fill(self, tree, entries):
         tree.clear()
         for name, directory, size, path in entries:
             item = QTreeWidgetItem([name, '<DIR>' if directory else str(size)])
             item.setData(0, Qt.ItemDataRole.UserRole, (path, directory))
             tree.addTopLevelItem(item)
+        self.apply_file_filters(tree)
     def refresh_remote(self):
         if not self.connected: return
         path = self.remote_display.text() or '/'
@@ -488,6 +490,30 @@ class Session(QWidget):
             self.transfers.clear()
             self.progress_bars.clear()
 
+    def edit_file_filters(self):
+        dialog = QDialog(self); dialog.setWindowTitle('Filename filters'); dialog.resize(440, 200)
+        form = QFormLayout(dialog)
+        include = QLineEdit('; '.join(self.file_filter.include))
+        exclude = QLineEdit('; '.join(self.file_filter.exclude))
+        form.addRow('Include files', include); form.addRow('Exclude files / folders', exclude)
+        note = QLabel('Separate patterns with ; (for example *.txt; *.zip).\nExclusions such as build; __pycache__; *.pyc also apply to folder uploads.\nRules apply to this tab. Folders remain navigable unless excluded.')
+        note.setWordWrap(True); form.addRow(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted: return
+        self.file_filter = FileFilter(include.text(), exclude.text())
+        for tree in (self.local_tree, self.remote_tree):
+            self.apply_file_filters(tree)
+
+    def apply_file_filters(self, tree):
+        for index in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(index)
+            if item.text(0) == '..': continue
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            hidden = not self.file_filter.allows(item.text(0), directory=bool(data and data[1]))
+            if hidden: item.setSelected(False)
+            item.setHidden(hidden)
+
     def upload_paths(self, paths):
         if not self.connected:
             self.status.setText('Connect to a server first'); return
@@ -501,11 +527,12 @@ class Session(QWidget):
         self.clear_finished_queue()
         self.status.setText('Preparing upload queue…')
         resume = self.resume.isChecked()
+        file_filter = self.file_filter
         def ready(plan):
             directories, files, skipped = plan
             self.activity_toggle.setChecked(True); self.activity.setCurrentIndex(0)
-            self.status.setText(f'Queued {len(directories)} folders and {len(files)} files; skipped {skipped} links')
-            self.log.appendPlainText(f'Upload destination: {target}\nPlanning complete: {len(directories)} folders, {len(files)} files, {skipped} links skipped.')
+            self.status.setText(f'Queued {len(directories)} folders and {len(files)} files; skipped {skipped} links/excluded items')
+            self.log.appendPlainText(f'Upload destination: {target}\nPlanning complete: {len(directories)} folders, {len(files)} files, {skipped} links/excluded items skipped.')
             actions = chain(((None, directory) for directory in directories), iter(files))
             self.upload_batches.append({'actions': iter(actions), 'resume': resume,
                 'remaining': len(files), 'barrier': threading.Event(), 'directories_ready': False,
@@ -513,7 +540,7 @@ class Session(QWidget):
             # Keep the tab alive until its remaining plan has been dispatched.
             self.pending += 1
             self.queue_timer.start()
-        self.submit(lambda: plan_uploads(paths, target), ready, operation='Upload planning')
+        self.submit(lambda: plan_uploads(paths, target, file_filter), ready, operation='Upload planning')
     def dispatch_upload_batch(self):
         if not self.upload_batches:
             self.queue_timer.stop(); return
@@ -690,6 +717,7 @@ class App(QMainWindow):
         self.menu_button = QPushButton('Menu ▾')
         menu = QMenu(self.menu_button)
         menu.addAction('Settings', self.open_settings)
+        menu.addAction('Filename filters', lambda: self.tabs.currentWidget().edit_file_filters() if self.tabs.currentWidget() else None)
         menu.addAction('Exit', self.close)
         self.menu_button.setMenu(menu); header.addWidget(self.menu_button)
         layout.addLayout(header)

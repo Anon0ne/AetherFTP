@@ -582,7 +582,7 @@ def test_menu_has_settings_and_exit_and_panel_has_all_controls():
     from aetherftp import App,SettingsDialog
     os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
     window=App(logging.getLogger('settings-menu'))
-    assert [action.text() for action in window.menu_button.menu().actions()]==['Settings','Exit']
+    assert [action.text() for action in window.menu_button.menu().actions()]==['Settings','Filename filters','Exit']
     dialog=SettingsDialog(window)
     assert set(dialog.fields)=={'uploads','downloads','upload_mbps','download_mbps'}
     dialog.reject(); window.close(); app.processEvents()
@@ -699,5 +699,41 @@ def test_fresh_queue_retains_active_work_and_event_history():
         session.events.get_nowait(); session.clear_finished_queue()
         assert session.transfers.topLevelItemCount() == 0 and not session.progress_bars
         assert 'Previous upload completed' in session.log.toPlainText()
+    finally:
+        session.timer.stop(); session.jobs.put(None); session.worker.join(1)
+
+def test_upload_filters_prune_excluded_folders_and_keep_matching_files(tmp_path):
+    from upload_plan import plan_uploads
+    from file_filters import FileFilter
+    source = tmp_path/'project'
+    for folder in ('build','__pycache__','src','empty'): (source/folder).mkdir(parents=True)
+    for name in ('build/output.TXT','__pycache__/cache.pyc','src/keep.TXT','src/skip.zip'):
+        (source/name).write_text('data')
+    dirs, files, skipped = plan_uploads([source], '/files', FileFilter('*.txt', 'build; __pycache__'))
+    assert '/files/project/build' not in dirs and '/files/project/__pycache__' not in dirs
+    assert '/files/project/empty' in dirs
+    assert files == [(str(source/'src/keep.TXT'), '/files/project/src/keep.TXT')]
+    assert skipped == 3
+
+
+def test_pane_filters_survive_refresh_and_deselect_hidden_files():
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from PySide6.QtWidgets import QApplication
+    from aetherftp import Session
+    from file_filters import FileFilter
+    app = QApplication.instance() or QApplication([])
+    session = Session(logging.getLogger('pane-filters'))
+    entries = [('..',True,0,'/'),('folder',True,0,'/folder'),('keep.txt',False,1,'/keep.txt'),('skip.zip',False,1,'/skip.zip')]
+    try:
+        session.fill(session.remote_tree,entries)
+        session.remote_tree.topLevelItem(3).setSelected(True)
+        session.file_filter = FileFilter('*.txt')
+        session.apply_file_filters(session.remote_tree)
+        assert session.remote_tree.topLevelItem(3).isHidden()
+        assert not session.remote_tree.topLevelItem(3).isSelected()
+        session.fill(session.remote_tree,entries)
+        assert session.remote_tree.topLevelItem(3).isHidden()
+        assert not session.remote_tree.topLevelItem(0).isHidden()
+        assert not session.remote_tree.topLevelItem(1).isHidden()
     finally:
         session.timer.stop(); session.jobs.put(None); session.worker.join(1)
