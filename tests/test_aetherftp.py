@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 import pytest
 import server_book as book
 from transfer_client import Client
@@ -339,3 +339,95 @@ def test_server_errors_are_logged_with_credentials_redacted(monkeypatch):
         assert session.activity.currentIndex()==1
     finally:
         session.timer.stop(); session.jobs.put(None); session.worker.join(3); logger.removeHandler(handler)
+
+
+def test_folder_plan_preserves_nested_and_empty_directories(tmp_path):
+    from upload_plan import plan_uploads
+    source=tmp_path/'project'; (source/'nested').mkdir(parents=True); (source/'empty').mkdir()
+    (source/'top.txt').write_text('top'); (source/'nested'/'child.txt').write_text('child')
+    directories, files, skipped=plan_uploads([source],'/files')
+    assert directories == ['/files/project','/files/project/empty','/files/project/nested']
+    assert dict(files) == {str(source/'top.txt'):'/files/project/top.txt',str(source/'nested'/'child.txt'):'/files/project/nested/child.txt'}
+    assert skipped==0
+
+
+def test_folder_plan_skips_links(tmp_path, monkeypatch):
+    import upload_plan
+    source=tmp_path/'project'; source.mkdir(); (source/'link').mkdir(); (source/'link'/'outside.txt').write_text('not uploaded')
+    monkeypatch.setattr(upload_plan,'is_link',lambda p: p.name=='link')
+    dirs, files, skipped=upload_plan.plan_uploads([source],'/files')
+    assert dirs==['/files/project'] and files==[] and skipped==1
+
+
+def test_existing_ftp_directory_and_permission_failure():
+    import ftplib
+    c=Client(); c.kind='FTPES'; c.conn=Mock(); c.conn.mkd.side_effect=ftplib.error_perm('550 Exists or denied'); c.conn.pwd.return_value='/original'
+    c.ensure_directory('/files/project')
+    assert c.conn.cwd.call_args_list == [call('/files/project'),call('/original')]
+    c.conn.cwd.side_effect=lambda path: (_ for _ in ()).throw(ftplib.error_perm('550 Denied')) if path=='/files/denied' else None
+    with pytest.raises(ftplib.error_perm): c.ensure_directory('/files/denied')
+
+
+def test_existing_sftp_directory_is_verified():
+    import stat
+    c=Client(); c.kind='SFTP'; c.conn=Mock(); c.conn.mkdir.side_effect=OSError('Exists')
+    c.conn.stat.return_value.st_mode=stat.S_IFDIR
+    c.ensure_directory('/files/project')
+    c.conn.stat.return_value.st_mode=stat.S_IFREG
+    with pytest.raises(OSError): c.ensure_directory('/files/project')
+
+
+def test_gui_queues_folder_creation_before_files(tmp_path,monkeypatch):
+    import time
+    from PySide6.QtWidgets import QApplication,QMessageBox
+    from aetherftp import Session
+    os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
+    source=tmp_path/'project'; (source/'empty').mkdir(parents=True); (source/'child.txt').write_bytes(b'data')
+    session=Session(logging.getLogger('folder-test')); session.connected=True; session.remote_path='/files'
+    calls=[]
+    monkeypatch.setattr(QMessageBox,'question',lambda *args: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(session.client,'ensure_directory',lambda path:calls.append(('mkdir',path)))
+    def upload(local,remote,callback,resume):
+        calls.append(('upload',remote)); callback(0,4); callback(4,4)
+    monkeypatch.setattr(session.client,'upload',upload); monkeypatch.setattr(session,'refresh_remote',lambda:None)
+    try:
+        session.upload_paths([source])
+        deadline=time.monotonic()+3
+        while session.pending and time.monotonic()<deadline:
+            session.pump(); app.processEvents(); time.sleep(.01)
+        assert session.pending==0
+        assert calls==[('mkdir','/files/project'),('mkdir','/files/project/empty'),('upload','/files/project/child.txt')]
+        assert session.transfers.topLevelItemCount()==3
+        assert '/files/project/child.txt' in session.log.toPlainText()
+    finally:
+        session.timer.stop(); session.jobs.put(None); session.worker.join(3)
+
+
+def test_local_pane_drag_contains_folder_and_excludes_parent(tmp_path,monkeypatch):
+    import aetherftp
+    from PySide6.QtWidgets import QApplication,QTreeWidgetItem
+    from PySide6.QtCore import Qt
+    os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
+    tree=aetherftp.FileTree(); folder=tmp_path/'project'; folder.mkdir()
+    for name,path in [('..',str(tmp_path)),('project',str(folder))]:
+        item=QTreeWidgetItem([name,'<DIR>']); item.setData(0,Qt.ItemDataRole.UserRole,(path,True)); tree.addTopLevelItem(item); item.setSelected(True)
+    drag=Mock(); monkeypatch.setattr(aetherftp,'QDrag',Mock(return_value=drag))
+    tree.startDrag(Qt.DropAction.CopyAction)
+    mime=drag.setMimeData.call_args.args[0]
+    assert [Path(url.toLocalFile()) for url in mime.urls()] == [folder]
+    drag.exec.assert_called_once_with(Qt.DropAction.CopyAction)
+
+
+def test_remote_drop_accepts_folder_url(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt,QUrl,QMimeData,QPointF
+    from PySide6.QtGui import QDropEvent
+    from aetherftp import FileTree
+    os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
+    folder=tmp_path/'project'; folder.mkdir(); upload=Mock(); tree=FileTree(upload)
+    mime=QMimeData(); mime.setUrls([QUrl.fromLocalFile(str(folder))])
+    event=QDropEvent(QPointF(5,5),Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,mime,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier)
+    event.setDropAction(Qt.DropAction.MoveAction)
+    tree.dropEvent(event)
+    upload.assert_called_once_with([folder]); assert event.isAccepted()
+    assert event.dropAction() == Qt.DropAction.CopyAction

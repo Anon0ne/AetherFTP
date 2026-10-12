@@ -2,6 +2,7 @@
 import ftplib
 import os
 import ssl
+import stat
 
 
 class ReuseFTP_TLS(ftplib.FTP_TLS):
@@ -95,6 +96,26 @@ class Client:
                     entries.append((short,isdir,0))
             finally:self.conn.cwd(old)
         return sorted(entries,key=lambda x:(not x[1],x[0].lower()))
+    def ensure_directory(self, path):
+        """Accept an existing directory, but never suppress a create failure."""
+        if self.kind == 'SFTP':
+            try:
+                self.conn.mkdir(path)
+            except OSError as error:
+                try: existing = self.conn.stat(path)
+                except OSError: raise error
+                if not stat.S_ISDIR(existing.st_mode): raise error
+        else:
+            try:
+                self.conn.mkd(path)
+            except ftplib.error_perm as error:
+                previous = self.conn.pwd()
+                try:
+                    self.conn.cwd(path)
+                except ftplib.error_perm:
+                    raise error
+                finally:
+                    self.conn.cwd(previous)
     def download(self,remote,local,callback,resume=False):
         if self.kind != 'SFTP': self.conn.voidcmd('TYPE I')
         offset = os.path.getsize(local) if resume and os.path.exists(local) else 0

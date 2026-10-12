@@ -11,11 +11,12 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QMimeData, QUrl
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTabWidget,
     QSplitter, QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
-    QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView, QProgressBar)
+    QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView, QProgressBar, QAbstractItemView)
 from server_book import (load_profiles, save_profiles, encrypt_password,
     profile_password, windows_vault, STORE)
 from transfer_client import Client
@@ -23,6 +24,7 @@ from version import __version__
 from transfer_stats import TransferStats
 from connection_url import parse_connection_url
 from diagnostics import redact_message
+from upload_plan import plan_uploads
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -67,15 +69,29 @@ class FileTree(QTreeWidget):
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.drop_files = drop
+        if drop is not None:
+            self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setAcceptDrops(drop is not None)
+    def startDrag(self, supported_actions):
+        urls = []
+        for item in self.selectedItems():
+            if item.text(0) == '..': continue
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data: urls.append(QUrl.fromLocalFile(data[0]))
+        if not urls: return
+        mime = QMimeData(); mime.setUrls(urls)
+        drag = QDrag(self); drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
     def dragEnterEvent(self, event):
-        if self.drop_files and event.mimeData().hasUrls(): event.acceptProposedAction()
+        if self.drop_files and event.mimeData().hasUrls():
+            event.setDropAction(Qt.DropAction.CopyAction); event.accept()
     def dragMoveEvent(self, event):
-        if self.drop_files and event.mimeData().hasUrls(): event.acceptProposedAction()
+        if self.drop_files and event.mimeData().hasUrls():
+            event.setDropAction(Qt.DropAction.CopyAction); event.accept()
     def dropEvent(self, event):
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
         self.drop_files(paths)
-        event.acceptProposedAction()
+        event.setDropAction(Qt.DropAction.CopyAction); event.accept()
 
 
 class Session(QWidget):
@@ -136,6 +152,12 @@ class Session(QWidget):
             path.returnPressed.connect(lambda s=side: self.navigate(s))
             box.addWidget(path); setattr(self, side + '_display', path)
             tree = FileTree(self.upload_paths if side == 'remote' else None)
+            if side == 'local':
+                tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+                tree.setDragEnabled(True)
+                tree.setToolTip('Drag selected files or folders to the remote pane to upload.')
+            else:
+                tree.setToolTip('Drop local files or folders here to upload into the current remote directory.')
             tree.setMinimumHeight(80)
             tree.itemDoubleClicked.connect(lambda item, col, s=side: self.open_item(s, item))
             box.addWidget(tree, 1); setattr(self, side + '_tree', tree)
@@ -209,6 +231,8 @@ class Session(QWidget):
                 details = f"{stamp}  {label}  [{data['transfer_id'][:8]}]  {data['event'].removeprefix('transfer_')}"
                 if 'duration_seconds' in data:
                     details += f"  | {data['duration_seconds']:.3f} s | {data['average_mbps']:.2f} MB/s | {data['bytes_transferred']} bytes"
+                if data['event'] == 'transfer_started' and len(event) > 3:
+                    details += '\n  Remote path: ' + event[3]
                 self.log.appendPlainText(details)
             elif event[0] == 'success':
                 if event[3] is not None: self.set_transfer_state(event[3], 'Completed')
@@ -306,9 +330,9 @@ class Session(QWidget):
         path, directory = item.data(0, Qt.ItemDataRole.UserRole)
         if directory:
             getattr(self, side + '_display').setText(path); self.navigate(side)
-    def enqueue_transfer(self, direction, source, dest):
+    def enqueue_transfer(self, direction, source, dest, resume_override=None):
         if not self.connected: self.status.setText('Connect to a server first'); return
-        resume = self.resume.isChecked()
+        resume = self.resume.isChecked() if resume_override is None else resume_override
         row = self.transfers.topLevelItemCount()
         self.transfers.addTopLevelItem(QTreeWidgetItem([direction + ': ' + Path(source).name, 'Queued']))
         bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(0); bar.setMinimumHeight(28)
@@ -318,10 +342,11 @@ class Session(QWidget):
         self.progress_bars[row] = bar
         self.activity_toggle.setChecked(True); self.activity.setCurrentIndex(0)
         transfer_id = str(uuid.uuid4())
-        self.transfers.topLevelItem(row).setToolTip(0, 'Transfer ID: ' + transfer_id)
+        self.transfers.topLevelItem(row).setToolTip(0, 'Transfer ID: ' + transfer_id + '\nRemote path: ' + (str(dest) if direction == 'Upload' else str(source)))
         def record(event, **fields):
             self.events.put(('transfer_event', {'event': event, 'transfer_id': transfer_id,
-                'direction': direction, 'timestamp': datetime.now(timezone.utc).isoformat(), **fields}, row))
+                'direction': direction, 'timestamp': datetime.now(timezone.utc).isoformat(), **fields}, row,
+                str(dest) if direction == 'Upload' else str(source)))
         stats = None
         last_emit = [0.0]
         def progress(done, total):
@@ -348,13 +373,32 @@ class Session(QWidget):
             self.refresh_local() if direction == 'Download' else self.refresh_remote()
         self.submit(transfer, completed, row, operation=direction)
     def upload_paths(self, paths):
-        for path in paths:
-            if path.is_file():
-                # Explicit overwrite consent also applies to files dropped from Explorer.
-                if not self.resume.isChecked() and QMessageBox.question(self, 'Upload file', 'Upload this file? An existing remote file with this name will be replaced.\n' + path.name) != QMessageBox.StandardButton.Yes: continue
-                self.enqueue_transfer('Upload', str(path), posixpath.join(self.remote_path, path.name))
+        if not self.connected:
+            self.status.setText('Connect to a server first'); return
+        paths = [Path(path) for path in paths]
+        if not paths: return
+        target = self.remote_path
+        if not self.resume.isChecked() and QMessageBox.question(self, 'Upload files and folders',
+                f'Upload {len(paths)} selected item(s) into {target}?\n'
+                'Folders include their contents and empty subfolders. Existing matching files will be replaced.') != QMessageBox.StandardButton.Yes:
+            return
+        self.status.setText('Preparing upload queue…')
+        resume = self.resume.isChecked()
+        def ready(plan):
+            directories, files, skipped = plan
+            self.activity_toggle.setChecked(True); self.activity.setCurrentIndex(0)
+            self.status.setText(f'Queued {len(directories)} folders and {len(files)} files; skipped {skipped} links')
+            self.log.appendPlainText(f'Upload destination: {target}\nPlanning complete: {len(directories)} folders, {len(files)} files, {skipped} links skipped.')
+            for directory in directories:
+                row = self.transfers.topLevelItemCount()
+                self.transfers.addTopLevelItem(QTreeWidgetItem(['Create folder: ' + directory, 'Queued']))
+                self.submit(lambda p=directory: self.client.ensure_directory(p), row=row, operation='Create remote folder')
+            for local, remote in files:
+                self.enqueue_transfer('Upload', local, remote, resume_override=resume)
+            if not files: self.submit(lambda: None, lambda _: self.refresh_remote())
+        self.submit(lambda: plan_uploads(paths, target), ready, operation='Upload planning')
     def upload_selected(self):
-        self.upload_paths([Path(i.data(0, Qt.ItemDataRole.UserRole)[0]) for i in self.local_tree.selectedItems() if not i.data(0, Qt.ItemDataRole.UserRole)[1]])
+        self.upload_paths([Path(i.data(0, Qt.ItemDataRole.UserRole)[0]) for i in self.local_tree.selectedItems() if i.text(0) != '..'])
     def download_selected(self):
         for item in self.remote_tree.selectedItems():
             source, directory = item.data(0, Qt.ItemDataRole.UserRole)

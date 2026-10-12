@@ -1,4 +1,4 @@
-# AetherFTP 0.4.4
+# AetherFTP 0.5.0
 
 A modern Windows FTP/FTPS/SFTP client inspired by Marauder V8 styling.
 Project builder: **Anon0ne**.
@@ -18,7 +18,7 @@ python -m venv .venv
 
 ## Connections and transfers
 
-Each connection tab has independent credentials, paths and a sequential transfer queue. File panes expand with the window. Use **Transfer activity** at the bottom to show or hide the queue and event log. Select multiple files to upload or download. Drop files from Explorer onto the remote file pane to upload. Directory transfers, queue cancellation, persisted queues, and internal pane-to-pane drag-and-drop are future work.
+Each connection tab has independent credentials, paths and a sequential transfer queue. File panes expand with the window. Use **Transfer activity** at the bottom to show or hide the queue and event log. Select multiple files to upload or download. Drag selected files or folders from the local pane, or drop them from Explorer, onto the remote pane to upload into its current directory. Folder uploads preserve their name, nested contents and empty directories; each file has its own queue progress bar. Folder scanning happens in the background. Links and junctions are skipped, with a count in the Event Log. Recursive downloads, queue cancellation and persisted queues are future work.
 
 Enable **Resume partial files** only when the destination contains the exact initial bytes of the same source file. Resume verifies sizes but does not verify file identity or hashes. Upload resume requires an existing remote file. FTP servers must support SIZE and REST; unsupported resume fails without a fallback overwrite. Failed transfers remain visible and can be requeued using the file selection controls. Finish queued work before disconnecting or closing a tab.
 
@@ -53,3 +53,9 @@ Paste a URL such as `ftpes://sampleuser@example.invalid:2990/files/sample.txt` i
 The Event log tab records TCP connection, AUTH TLS and certificate verification, negotiated TLS version, login, PROT P, binary mode, directory-listing status and protected data handshakes. Errors open this tab automatically and include the failing operation plus the server reply or SSL message, with known credentials redacted. FTPES/FTPS data sockets reuse the control connection’s TLS session; certificate checks remain enabled.
 
 Session reuse solves compatibility with servers that require it, but does not bypass certificate problems, authentication failures or blocked passive data ports. Python’s SSLSession API has limitations with TLS 1.3; the negotiated TLS version and exact redacted handshake error help diagnose remaining interoperability problems.
+
+## Folder uploads and server write errors
+
+Select a folder and click Upload, or drag it from the local pane/Explorer onto the remote pane. Confirm the current remote destination. AetherFTP queues directory creation first, then contained files with individual progress and timings. Existing directories are accepted only after verifying they are directories. Existing matching files can be replaced after the batch confirmation; unrelated remote files are retained. Resume remains opt-in and requires existing matching partial files; leave it off for a new folder upload.
+
+The Event Log shows the remote destination for every attempted transfer. A `553 Could not create file` response is a server rejection of file creation, separate from folder selection: check the chosen remote directory, account write permissions, quota/free space and filename conflicts. The app keeps creation and transfer failures visible.

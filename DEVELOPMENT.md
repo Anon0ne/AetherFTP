@@ -13,7 +13,7 @@ Windows Python 3.12: automated tests include real DPAPI encryption/decryption an
 ## Remaining work
 
 - Test against controlled real FTP/FTPS/SFTP servers, including interrupted transfers and REST support.
-- Add internal pane-to-pane drag-and-drop, recursive directory transfers, queue pause/cancel and persisted recovery.
+- Add recursive downloads, queue pause/cancel and persisted recovery. Local-to-server pane drag-and-drop and recursive folder uploads are implemented in 0.5.0.
 - Test Credential Manager lifecycle and migration with disposable credentials on a dedicated Windows test machine.
 - Expand keyboard, accessibility, enlarged-font and narrow-window validation.
 - Restore GitHub authentication, create a private repository, and verify hosted Actions before publishing a release.

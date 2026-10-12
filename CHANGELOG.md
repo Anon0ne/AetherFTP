@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 — 2026-10-11
+
+- Upload folders recursively, preserving nested paths and empty directories.
+- Drag files and folders from the local pane or Explorer into the server pane.
+- Plan uploads in the background and queue remote directory creation before per-file transfers.
+- Verify existing remote directories instead of hiding permission failures.
+- Skip symlinks and junctions and exclude the parent-navigation row from uploads.
+- Show exact remote transfer destinations in the Event Log for debugging server write errors.
+
+
 ## 0.4.4 — 2026-10-11
 
 - Reuse the authenticated TLS control session for protected FTPES/FTPS data connections.
