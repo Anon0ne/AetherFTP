@@ -1048,7 +1048,9 @@ class RemoteSearch(QDialog):
                     item.setHidden(False); item.setSelected(True); self.session.edit_remote_file(); break
         self.session.refresh_remote(posixpath.dirname(path), select)
     def closeEvent(self, event):
-        self.cancelled.set(); self.render_timer.stop(); self.render_pending.clear(); super().closeEvent(event)
+        self.cancelled.set()
+        if self.render_timer.isActive(): self.finish()
+        self.render_pending.clear(); super().closeEvent(event)
 
 
 class ServerBook(QDialog):

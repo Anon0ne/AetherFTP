@@ -30,4 +30,4 @@ Source history uses Justin Funderburk's supplied author identity. Product builde
 
 ## 0.1.2b verification
 
-116 tests cover remote traversal, recursive downloads, Windows destination safety, conflict preflight, deletion ordering, actual Qt drop events, destination dialogs and search cancellation/rendering, alongside prior regressions. Adapter tests use disposable trees; broad live-server validation remains ongoing. Windows CI must pass for the exact release commit before publication.
+117 tests cover remote traversal, recursive downloads, Windows destination safety, conflict preflight, deletion ordering, actual Qt drop events, destination dialogs and search cancellation/rendering, alongside prior regressions. Adapter tests use disposable trees; broad live-server validation remains ongoing. Windows CI must pass for the exact release commit before publication.

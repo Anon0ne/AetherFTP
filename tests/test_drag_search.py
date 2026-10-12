@@ -137,3 +137,13 @@ def test_stopping_paused_folder_download_releases_batch_holds(session,tmp_path,m
     while session.pending and time.monotonic()<deadline:session.pump();time.sleep(.005)
     assert session.pending==0 and not session.active_batches
     assert not (tmp_path/'project'/'a.txt').exists()
+
+def test_closing_search_during_result_rendering_allows_reopening(session):
+    session.client.listdir=Mock(return_value=[('a.txt',False,3)])
+    session.open_search();dialog=session.search_dialog;dialog.begin()
+    deadline=time.monotonic()+2
+    while session.pending and time.monotonic()<deadline:session.pump();time.sleep(.005)
+    assert dialog.render_timer.isActive() and dialog.busy
+    dialog.close()
+    assert not dialog.busy and not dialog.render_timer.isActive()
+    session.open_search();assert dialog.start.isEnabled();dialog.close()
