@@ -35,7 +35,7 @@ from transfer_pool import TransferPool
 from user_settings import DEFAULTS, load_settings, save_settings
 from file_filters import FileFilter
 from file_tools import load_bookmarks, save_bookmarks, server_scope, paired_paths, RemoteEdit
-from local_files import read_directory
+from local_files import read_directory, navigation_path
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -398,8 +398,8 @@ class Session(QWidget):
             self.client.close(); self.transfer_pool.close_idle_connections()
         self.submit(close_connections, lambda _: self.status.setText('OFFLINE'), operation='Disconnect')
     def refresh_local(self, target=None):
-        candidate = Path(target or self.local_path).expanduser()
         try:
+            candidate = navigation_path(target or self.local_path)
             entries, skipped = read_directory(candidate)
         except OSError as error:
             self.local_display.setText(str(self.local_path))
@@ -453,7 +453,9 @@ class Session(QWidget):
     def navigate(self, side):
         if self.sync_roots:
             try:
-                local, remote = paired_paths(*self.sync_roots, side, getattr(self, side + '_display').text())
+                target = getattr(self, side + '_display').text()
+                if side == 'local': target = navigation_path(target)
+                local, remote = paired_paths(*self.sync_roots, side, target)
                 if not local.is_dir(): raise ValueError('Matching local folder does not exist')
                 entries, skipped = read_directory(local)
             except (ValueError, OSError) as error:
@@ -561,7 +563,8 @@ class Session(QWidget):
         def open_current():
             record = choices.currentData()
             if not record: return
-            local = Path(record['local'])
+            try: local = navigation_path(record['local'])
+            except OSError as error: QMessageBox.warning(dialog, 'Bookmark unavailable', type(error).__name__); return
             if not local.is_dir(): QMessageBox.warning(dialog, 'Bookmark unavailable', 'Local folder no longer exists.'); return
             try: entries, skipped = read_directory(local)
             except OSError as error: QMessageBox.warning(dialog, 'Bookmark unavailable', type(error).__name__); return

@@ -34,3 +34,18 @@ def test_failed_local_navigation_retains_previous_path_and_rows(tmp_path):
         assert 'FileNotFoundError' in session.status.text()
     finally:
         session.timer.stop(); session.edit_timer.stop(); session.jobs.put(None); session.worker.join(1)
+
+def test_my_documents_navigation_uses_junction_target(tmp_path,monkeypatch):
+    import pytest
+    import local_files
+    if os.name != 'nt': pytest.skip('Windows compatibility junction')
+    home=tmp_path/'home'; home.mkdir(); real=home/'Documents'; real.mkdir()
+    alias=home/'My Documents'; alias.mkdir()
+    monkeypatch.setattr(Path,'home',classmethod(lambda cls:home))
+    monkeypatch.setattr(Path,'is_junction',lambda path:path==alias)
+    monkeypatch.setattr(Path,'readlink',lambda path:real)
+    assert local_files.navigation_path(alias)==real
+    assert local_files.navigation_path(alias/'nested')==real/'nested'
+    assert local_files.navigation_path(tmp_path/'other'/'My Documents')==tmp_path/'other'/'My Documents'
+    monkeypatch.setattr(Path,'is_junction',lambda path:False)
+    assert local_files.navigation_path(alias)==alias

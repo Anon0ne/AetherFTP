@@ -1,6 +1,34 @@
 """Read local folders without allowing an inaccessible child to hide siblings."""
 from pathlib import Path
+import os
 import stat
+
+
+def navigation_path(path):
+    """Resolve only the current user's legacy My Documents junction."""
+    path = Path(path).expanduser().absolute()
+    if os.name != 'nt':
+        return path
+    try:
+        relative = path.relative_to(Path.home())
+    except ValueError:
+        return path
+    if not relative.parts or relative.parts[0].casefold() != 'my documents':
+        return path
+    alias = Path.home() / relative.parts[0]
+    junction = getattr(alias, 'is_junction', lambda: (
+        getattr(alias.lstat(), 'st_reparse_tag', None) == 0xA0000003))()
+    if not junction:
+        return path
+    target = str(alias.readlink())
+    if target.startswith('\\\\?\\UNC\\'):
+        target = '\\\\' + target[8:]
+    elif target.startswith('\\\\?\\'):
+        target = target[4:]
+    target = Path(target)
+    if not target.is_absolute():
+        target = alias.parent / target
+    return target.joinpath(*relative.parts[1:])
 
 
 def read_directory(path):

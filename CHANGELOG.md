@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resolve the current user's legacy My Documents junction to its real target for local navigation, without changing filesystem permissions.
+
 - Keep local folders readable when a child entry is missing or inaccessible; retain the current folder on navigation failure.
 
 - Begin next-release file tools: per-tab filename include/exclude filters, with excluded folders pruned from upload plans.
