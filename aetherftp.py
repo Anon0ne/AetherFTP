@@ -8,6 +8,7 @@ import posixpath
 import queue
 import sys
 import ssl
+import subprocess
 import threading
 import uuid
 import time
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTabWidget,
     QSplitter, QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
     QFormLayout, QGridLayout, QDialogButtonBox, QMessageBox, QCheckBox, QHeaderView, QProgressBar, QAbstractItemView,
-    QMenu, QSpinBox, QDoubleSpinBox, QSizePolicy, QLayout)
+    QMenu, QSpinBox, QDoubleSpinBox, QSizePolicy, QLayout, QInputDialog)
 from server_book import (load_profiles, save_profiles, encrypt_password,
     profile_password, windows_vault, STORE)
 from transfer_client import Client
@@ -33,6 +34,7 @@ from upload_plan import plan_uploads
 from transfer_pool import TransferPool
 from user_settings import DEFAULTS, load_settings, save_settings
 from file_filters import FileFilter
+from file_tools import load_bookmarks, save_bookmarks, server_scope, paired_paths, RemoteEdit
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -155,6 +157,10 @@ class Session(QWidget):
         self.local_path = Path.home()
         self.remote_path = '/'
         self.file_filter = FileFilter()
+        self.sync_roots = None
+        self.edits = []
+        self.pending_edits = set()
+        self.edit_prompt_active = False
         self.url_filename = ''
         self.worker = threading.Thread(target=self.run_jobs, daemon=True)
         self.worker.start()
@@ -241,6 +247,8 @@ class Session(QWidget):
         self.queue_timer = QTimer(self); self.queue_timer.setInterval(10)
         self.queue_timer.timeout.connect(self.dispatch_upload_batch)
         self.refresh_local()
+        self.edit_timer = QTimer(self); self.edit_timer.setInterval(1000)
+        self.edit_timer.timeout.connect(self.check_edit_changes); self.edit_timer.start()
     def toggle_activity(self, visible):
         if not visible:
             self.activity_height = self.activity_splitter.sizes()[1]
@@ -277,7 +285,8 @@ class Session(QWidget):
         finally: self.events.put(('done', on_finished))
     def run_transfer_job(self, client, ensure, job):
         action, success, row, operation, on_finished = job
-        client.on_status = lambda message: self.events.put(('connection_step', f'{operation} #{row + 1}: {message}', datetime.now(timezone.utc).isoformat()))
+        label = operation + (f' #{row + 1}' if row is not None else '')
+        client.on_status = lambda message: self.events.put(('connection_step', f'{label}: {message}', datetime.now(timezone.utc).isoformat()))
         def execute():
             try: return action(client, ensure)
             except Exception:
@@ -359,6 +368,8 @@ class Session(QWidget):
         return True
 
     def connect_server(self):
+        if self.edits:
+            self.status.setText('Stop remote editing sessions before reconnecting'); return
         if not self.load_connection_url(): return
         if self.pending:
             self.status.setText('Wait for queued operations before reconnecting'); return
@@ -370,6 +381,7 @@ class Session(QWidget):
         args = (self.host.text().strip(), port, self.user.text(), self.password.text(), self.protocol.currentText())
         self.connection_secrets = tuple(value for value in args[:1] + args[2:4] if value)
         self.connection_args = args
+        self.sync_roots = None
         self.connected = False
         self.status.setText('CONNECTING…')
         self.submit(lambda: self.client.connect(*args), self.on_connected, operation='Connect')
@@ -377,8 +389,10 @@ class Session(QWidget):
         self.connected = True; self.status.setText('CONNECTED'); self.refresh_remote()
         self.logger.info(json.dumps({'event': 'connected', 'protocol': self.protocol.currentText()}))
     def disconnect(self):
+        if self.edits: self.status.setText('Stop remote editing sessions before disconnecting'); return
         if self.pending: self.status.setText('Wait for queued operations before disconnecting'); return
         self.connected = False
+        self.sync_roots = None
         def close_connections():
             self.client.close(); self.transfer_pool.close_idle_connections()
         self.submit(close_connections, lambda _: self.status.setText('OFFLINE'), operation='Disconnect')
@@ -396,11 +410,12 @@ class Session(QWidget):
             item.setData(0, Qt.ItemDataRole.UserRole, (path, directory))
             tree.addTopLevelItem(item)
         self.apply_file_filters(tree)
-    def refresh_remote(self):
+    def refresh_remote(self, target=None, on_success=None):
         if not self.connected: return
-        path = self.remote_display.text() or '/'
+        path = target or self.remote_display.text() or '/'
         def done(entries):
             self.remote_path = path
+            self.remote_display.setText(path)
             rows = [('..', True, 0, posixpath.dirname(path.rstrip('/')) or '/')]
             rows += [(n, d, s, posixpath.join(path, n)) for n, d, s in entries]
             self.fill(self.remote_tree, rows)
@@ -408,6 +423,7 @@ class Session(QWidget):
                 for item in self.remote_tree.findItems(self.url_filename, Qt.MatchFlag.MatchExactly, 0):
                     item.setSelected(True); self.remote_tree.scrollToItem(item)
                 self.url_filename = ''
+            if on_success: on_success()
         def listing():
             try:
                 return self.client.listdir(path)
@@ -424,13 +440,24 @@ class Session(QWidget):
                 return self.client.listdir(path)
         self.submit(listing, done, operation='Directory listing')
     def navigate(self, side):
+        if self.sync_roots:
+            try:
+                local, remote = paired_paths(*self.sync_roots, side, getattr(self, side + '_display').text())
+                if not local.is_dir(): raise ValueError('Matching local folder does not exist')
+            except (ValueError, OSError) as error:
+                self.status.setText(str(error)); self.local_display.setText(str(self.local_path)); self.remote_display.setText(self.remote_path); return
+            self.local_display.setText(str(self.local_path)); self.remote_display.setText(self.remote_path)
+            def paired():
+                self.local_path = local; self.refresh_local()
+            self.refresh_remote(remote, paired)
+            return
         if side == 'local': self.local_path = Path(self.local_display.text()).expanduser(); self.refresh_local()
         else: self.refresh_remote()
     def open_item(self, side, item):
         path, directory = item.data(0, Qt.ItemDataRole.UserRole)
         if directory:
             getattr(self, side + '_display').setText(path); self.navigate(side)
-    def enqueue_transfer(self, direction, source, dest, resume_override=None, refresh=True, barrier=None, on_finished=None):
+    def enqueue_transfer(self, direction, source, dest, resume_override=None, refresh=True, barrier=None, on_finished=None, transfer_override=None, on_success=None):
         if not self.connected: self.status.setText('Connect to a server first'); return
         self.clear_finished_queue()
         resume = self.resume.isChecked() if resume_override is None else resume_override
@@ -465,8 +492,11 @@ class Session(QWidget):
             record('transfer_started')
             try:
                 ensure_connected()
-                method = client.upload if direction == 'Upload' else client.download
-                method(str(source), str(dest), progress, resume=resume)
+                if transfer_override:
+                    transfer_override(client, progress)
+                else:
+                    method = client.upload if direction == 'Upload' else client.download
+                    method(str(source), str(dest), progress, resume=resume)
             except Exception as exc:
                 record('transfer_failed', error_type=type(exc).__name__, **stats.summary())
                 raise
@@ -476,6 +506,7 @@ class Session(QWidget):
         def completed(summary):
             bar.setProperty('average_text', f'{summary["average_mbps"]:.2f} MB/s')
             self.set_transfer_state(row, 'Completed')
+            if on_success: on_success()
             if refresh:
                 self.refresh_local() if direction == 'Download' else self.refresh_remote()
         self.pending += 1
@@ -489,6 +520,130 @@ class Session(QWidget):
         if self.pending == 0 and not self.upload_batches and self.events.empty():
             self.transfers.clear()
             self.progress_bars.clear()
+
+    def toggle_sync(self, enabled):
+        if enabled and not self.connected:
+            self.status.setText('Connect before enabling synchronized browsing'); return
+        self.sync_roots = (self.local_path, self.remote_path) if enabled else None
+        self.status.setText('Synchronized browsing enabled at current folders' if enabled else 'Synchronized browsing disabled')
+
+    def bookmarks(self):
+        if not self.connected or not self.connection_args:
+            self.status.setText('Connect before using server bookmarks'); return
+        scope = server_scope(self.connection_args)
+        records = load_bookmarks()
+        dialog = QDialog(self); dialog.setWindowTitle('Paired bookmarks'); dialog.resize(440, 180)
+        form = QFormLayout(dialog); choices = QComboBox()
+        matches = [r for r in records if r['scope'] == scope]
+        for record in matches: choices.addItem(record['name'], record)
+        form.addRow('This server', choices)
+        buttons = QHBoxLayout()
+        def save_current():
+            name, ok = QInputDialog.getText(dialog, 'Save bookmark', 'Name')
+            if not ok or not name.strip(): return
+            record = dict(name=name.strip(), scope=scope, local=str(self.local_path), remote=self.remote_path)
+            updated = [r for r in records if not (r['scope'] == scope and r['name'] == record['name'])] + [record]
+            try: save_bookmarks(updated)
+            except OSError as error: QMessageBox.warning(dialog, 'Bookmark not saved', type(error).__name__); return
+            dialog.accept()
+        def open_current():
+            record = choices.currentData()
+            if not record: return
+            local = Path(record['local'])
+            if not local.is_dir(): QMessageBox.warning(dialog, 'Bookmark unavailable', 'Local folder no longer exists.'); return
+            def opened():
+                self.local_path = local; self.refresh_local()
+                if self.sync_roots: self.sync_roots = (local, record['remote'])
+            self.refresh_remote(record['remote'], opened); dialog.accept()
+        def delete_current():
+            record = choices.currentData()
+            if not record: return
+            try: save_bookmarks([r for r in records if r != record])
+            except OSError as error: QMessageBox.warning(dialog, 'Bookmark not removed', type(error).__name__); return
+            dialog.accept()
+        for name, action in [('Save current pair', save_current), ('Open', open_current), ('Delete', delete_current)]:
+            button = QPushButton(name); button.clicked.connect(action); buttons.addWidget(button)
+        form.addRow(buttons); dialog.exec()
+
+    def open_editor(self, edit):
+        try:
+            editor = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'notepad.exe'
+            subprocess.Popen([str(editor), str(edit.path)])
+        except OSError as error:
+            QMessageBox.warning(self, 'Editor unavailable', type(error).__name__)
+
+    def edit_remote_file(self):
+        if not self.connected: self.status.setText('Connect before editing remote files'); return
+        selected = self.remote_tree.selectedItems()
+        if len(selected) != 1 or selected[0].data(0, Qt.ItemDataRole.UserRole)[1]:
+            self.status.setText('Select one remote file to edit'); return
+        remote = selected[0].data(0, Qt.ItemDataRole.UserRole)[0]
+        if remote in self.pending_edits:
+            self.status.setText('This editing download is already queued'); return
+        for edit in self.edits:
+            if edit.remote == remote: self.open_editor(edit); return
+        folder = STORE.parent / 'editing'; folder.mkdir(parents=True, exist_ok=True)
+        try: edit = RemoteEdit(remote, folder)
+        except (OSError, ValueError) as error: QMessageBox.warning(self, 'Cannot edit file', str(error)); return
+        def download(client, progress):
+            edit.download(client, progress)
+        def opened():
+            self.edits.append(edit); self.open_editor(edit)
+            self.status.setText('Editing ' + Path(edit.path).name + '; save in Notepad to detect changes')
+        def finished():
+            self.pending_edits.discard(remote)
+            if edit not in self.edits: edit.close()
+        self.pending_edits.add(remote)
+        self.enqueue_transfer('Download', remote, str(edit.path), resume_override=False, refresh=False,
+                              transfer_override=download, on_success=opened, on_finished=finished)
+
+    def check_edit_changes(self):
+        if self.pending or not self.connected or self.edit_prompt_active or QApplication.activeModalWidget(): return
+        for edit in self.edits:
+            try: stamp = edit.stamp()
+            except OSError: continue
+            if stamp == edit.last_stamp: continue
+            edit.last_stamp = stamp
+            self.log.appendPlainText('Editor save detected: ' + edit.path.name)
+            self.edit_prompt_active = True
+            try:
+                if QMessageBox.question(self, 'Upload edited file', 'Upload saved changes to ' + edit.remote + '?') == QMessageBox.StandardButton.Yes:
+                    self.upload_edit(edit)
+            finally: self.edit_prompt_active = False
+            break
+
+    def upload_edit(self, edit):
+        if not self.connected or self.pending:
+            self.status.setText('Connect and wait for current operations before uploading edits'); return
+        previous = [0]
+        def verify(done, total):
+            self.transfer_pool.bandwidth['Download'].consume(max(0, done - previous[0]))
+            previous[0] = done
+        def transfer(client, progress):
+            edit.upload_changes(client, progress, verify)
+        self.enqueue_transfer('Upload', str(edit.path), edit.remote, resume_override=False, transfer_override=transfer)
+
+    def manage_edits(self):
+        dialog = QDialog(self); dialog.setWindowTitle('Remote editing sessions')
+        form = QFormLayout(dialog); choices = QComboBox()
+        for edit in self.edits: choices.addItem(edit.remote, edit)
+        form.addRow('File', choices)
+        def action(kind):
+            edit = choices.currentData()
+            if not edit: return
+            if kind == 'Upload changes': self.upload_edit(edit)
+            elif kind == 'Reopen editor': self.open_editor(edit)
+            elif self.pending:
+                QMessageBox.warning(dialog, 'Operations active', 'Wait for operations before stopping editing.'); return
+            elif QMessageBox.question(dialog, 'Stop editing', 'Close Notepad first. Discard this local editing copy?') == QMessageBox.StandardButton.Yes:
+                try: edit.close()
+                except OSError as error: QMessageBox.warning(dialog, 'Editing copy in use', type(error).__name__); return
+                self.edits.remove(edit)
+            dialog.accept()
+        row = QHBoxLayout()
+        for name in ('Upload changes', 'Reopen editor', 'Stop editing'):
+            button = QPushButton(name); button.clicked.connect(lambda checked=False, name=name: action(name)); row.addWidget(button)
+        form.addRow(row); dialog.exec()
 
     def edit_file_filters(self):
         dialog = QDialog(self); dialog.setWindowTitle('Filename filters'); dialog.resize(440, 200)
@@ -718,6 +873,12 @@ class App(QMainWindow):
         menu = QMenu(self.menu_button)
         menu.addAction('Settings', self.open_settings)
         menu.addAction('Filename filters', lambda: self.tabs.currentWidget().edit_file_filters() if self.tabs.currentWidget() else None)
+        menu.addAction('Paired bookmarks', lambda: self.tabs.currentWidget().bookmarks() if self.tabs.currentWidget() else None)
+        sync = menu.addAction('Synchronized browsing'); sync.setCheckable(True)
+        sync.triggered.connect(lambda checked: self.tabs.currentWidget().toggle_sync(checked) if self.tabs.currentWidget() else None)
+        menu.aboutToShow.connect(lambda: sync.setChecked(bool(self.tabs.currentWidget() and self.tabs.currentWidget().sync_roots)))
+        menu.addAction('Edit selected remote file', lambda: self.tabs.currentWidget().edit_remote_file() if self.tabs.currentWidget() else None)
+        menu.addAction('Remote editing sessions', lambda: self.tabs.currentWidget().manage_edits() if self.tabs.currentWidget() else None)
         menu.addAction('Exit', self.close)
         self.menu_button.setMenu(menu); header.addWidget(self.menu_button)
         layout.addLayout(header)
@@ -733,11 +894,13 @@ class App(QMainWindow):
         session = self.tabs.widget(index)
         if session.pending:
             QMessageBox.warning(self, 'Queue active', 'Wait for queued operations before closing this tab.'); return
-        session.timer.stop(); session.queue_timer.stop(); session.jobs.put(None); session.worker.join(timeout=1)
+        if session.edits:
+            QMessageBox.warning(self, 'Editing active', 'Stop remote editing sessions before closing this tab.'); return
+        session.timer.stop(); session.queue_timer.stop(); session.edit_timer.stop(); session.jobs.put(None); session.worker.join(timeout=1)
         self.tabs.removeTab(index); session.deleteLater()
     def closeEvent(self, event):
-        if any(self.tabs.widget(i).pending for i in range(self.tabs.count())):
-            QMessageBox.warning(self, 'Queue active', 'Wait for queued operations before exiting.'); event.ignore(); return
+        if any(self.tabs.widget(i).pending or self.tabs.widget(i).edits for i in range(self.tabs.count())):
+            QMessageBox.warning(self, 'Operations or editing active', 'Wait for queued operations and stop remote editing sessions before exiting.'); event.ignore(); return
         while self.tabs.count(): self.close_tab(0)
         self.transfer_pool.shutdown()
         event.accept()

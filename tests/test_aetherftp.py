@@ -582,7 +582,7 @@ def test_menu_has_settings_and_exit_and_panel_has_all_controls():
     from aetherftp import App,SettingsDialog
     os.environ['QT_QPA_PLATFORM']='offscreen'; app=QApplication.instance() or QApplication([])
     window=App(logging.getLogger('settings-menu'))
-    assert [action.text() for action in window.menu_button.menu().actions()]==['Settings','Filename filters','Exit']
+    assert [action.text() for action in window.menu_button.menu().actions()]==['Settings','Filename filters','Paired bookmarks','Synchronized browsing','Edit selected remote file','Remote editing sessions','Exit']
     dialog=SettingsDialog(window)
     assert set(dialog.fields)=={'uploads','downloads','upload_mbps','download_mbps'}
     dialog.reject(); window.close(); app.processEvents()

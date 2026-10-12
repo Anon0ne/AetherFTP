@@ -8,6 +8,7 @@ dist/
 .env
 *.log
 servers.json
+bookmarks.json
 
 .pytest_cache/
 .test-tmp*/

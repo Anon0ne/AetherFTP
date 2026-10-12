@@ -79,3 +79,17 @@ See [ROADMAP.md](ROADMAP.md) for proposed features.
 ## Next-release development
 
 On the next-release branch, **Menu → Filename filters** sets include/exclude glob patterns for the current tab. Separate patterns with semicolons. For example, include `*.txt; *.zip`, or exclude `build; __pycache__; *.pyc`. Matching is case-insensitive. Both file panes hide excluded entries, and recursive upload planning prunes excluded folders and files. Include patterns select files while keeping directories navigable; exclusion rules can also hide/prune directories. Filters reset when the tab is closed. The published 0.1.0b executable does not include these development features.
+
+## Paired bookmarks and synchronized browsing (development)
+
+Connect, choose your local and remote folders, then open **Menu → Paired bookmarks** to save the pair under a name. Bookmarks are scoped to server/protocol/username and stored privately in `%APPDATA%\AetherFTP\bookmarks.json`; passwords are never stored in bookmarks. Open restores both paths after the remote listing succeeds; Delete removes a bookmark.
+
+Enable **Menu → Synchronized browsing** at the current folder pair. Navigating either pane maps the relative path to the other pane. The matching local folder must exist and the remote listing must succeed before both panes change. Navigation outside the root pair is rejected; disable synchronization to choose new roots. Opening a bookmark while synchronized replaces the root pair. This feature navigates folders; it does not copy or delete files.
+
+## Remote editing (development)
+
+Select one remote file and choose **Menu → Edit selected remote file**. AetherFTP downloads a temporary local copy through the transfer queue, then opens it explicitly in Windows Notepad. Saving the file triggers an upload confirmation once the tab is idle. Declining leaves the local copy available; **Menu → Remote editing sessions → Upload changes** retries manually. Reopen editor opens the same local copy.
+
+An edited upload uses a stable snapshot, downloads the current server copy and compares its SHA-256 digest with the original download. If they differ, it refuses to overwrite the server file; stop the editing session and download a new copy to reconcile changes. FTP/SFTP cannot guarantee an atomic compare-and-write, so a server change after the check can still race with the upload. The verification download adds network traffic and respects the download bandwidth cap. Edited uploads never resume, even if the general Resume option is enabled.
+
+Close Notepad and use **Remote editing sessions → Stop editing** to discard the temporary copy and finish the session. Active editing sessions prevent tab closure, exit, disconnect and reconnect, so local changes cannot be discarded silently or uploaded to a different server. Temporary files contain the edited content and remain under the user's application-data editing directory until the session is stopped. A crash may leave copies there for manual recovery/cleanup. Bookmarks and editing contents must not be committed or shared with diagnostic logs.

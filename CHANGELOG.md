@@ -3,7 +3,10 @@
 ## Unreleased
 
 - Begin next-release file tools: per-tab filename include/exclude filters, with excluded folders pruned from upload plans.
-- Paired bookmarks, synchronized browsing and remote editing remain planned.
+- Add private server-scoped paired bookmarks with save, open and delete controls.
+- Add synchronized browsing rooted at the current local/remote pair; update both panes only after a successful listing.
+- Add Notepad remote editing sessions, save detection, confirmed re-uploads, snapshot transfers and content conflict checks.
+- Use the normal transfer queue, directional bandwidth limits and destination locks for editing transfers; block reconnect/exit until editing sessions are stopped.
 
 ## 0.1.0b - 2026-10-12
 
