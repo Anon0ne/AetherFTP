@@ -3,6 +3,7 @@ import ftplib
 import os
 import ssl
 import stat
+import socket
 
 
 class ReuseFTP_TLS(ftplib.FTP_TLS):
@@ -11,11 +12,13 @@ class ReuseFTP_TLS(ftplib.FTP_TLS):
         report = getattr(self, 'on_status', None)
         if report: report('Opening FTP data connection')
         conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        self.active_data = conn
         if self._prot_p:
             try:
                 if report: report('Data TLS handshake: reusing control session')
                 conn = self.context.wrap_socket(conn, server_hostname=self.host,
                                                 session=self.sock.session)
+                self.active_data = conn
                 if report: report('Protected data connection established')
             except Exception:
                 conn.close()
@@ -28,6 +31,7 @@ class Client:
         self.conn=None; self.transport=None; self.kind=None
         self.on_status = None
         self.connection_stage = 'Not connected'
+        self.connecting = None
     def step(self, message):
         self.connection_stage = message
         if self.on_status: self.on_status(message)
@@ -41,18 +45,28 @@ class Client:
             ssh=paramiko.SSHClient(); ssh.load_system_host_keys(); ssh.load_host_keys(os.path.expanduser('~/.ssh/known_hosts')) if os.path.exists(os.path.expanduser('~/.ssh/known_hosts')) else None
             ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
             try:
+                self.connecting = ssh
                 self.step('SSH connection and authentication')
                 ssh.connect(hostname=host,port=port,username=username,password=password,timeout=20,banner_timeout=20,auth_timeout=20,look_for_keys=False,allow_agent=False)
                 self.step('Opening SFTP subsystem')
                 self.conn=ssh.open_sftp(); self.transport=ssh
             except Exception:
                 ssh.close(); raise
+            finally: self.connecting = None
         else:
             tls = protocol in ('FTPS', 'FTPES')
             cls=ReuseFTP_TLS if tls else ftplib.FTP
             c=cls(context=ssl.create_default_context()) if tls else cls()
             if tls: c.on_status = self.step
+            if not tls:
+                original_transfer = c.ntransfercmd
+                def tracked_transfer(*args, **kwargs):
+                    connection, size = original_transfer(*args, **kwargs)
+                    c.active_data = connection
+                    return connection, size
+                c.ntransfercmd = tracked_transfer
             try:
+                self.connecting = c
                 self.step('Connecting TCP socket')
                 c.connect(host,port,timeout=20)
                 self.step('TCP connected; server greeting received')
@@ -71,6 +85,7 @@ class Client:
                 c.voidcmd('TYPE I')
             except Exception:
                 c.close(); raise
+            finally: self.connecting = None
             self.conn=c
         self.kind=protocol
         self.step('Connection ready')
@@ -155,6 +170,21 @@ class Client:
                 count=[offset]
                 def block(data):count[0]+=len(data);callback(count[0],os.path.getsize(local))
                 self.conn.storbinary('STOR '+remote,f,callback=block,rest=offset or None)
+    def cancel(self):
+        # Shutdown interrupts blocking socket I/O; owning workers perform final close.
+        for connection in (self.conn, self.transport, self.connecting):
+            if connection is None: continue
+            sockets = [getattr(connection, 'sock', None), getattr(connection, 'active_data', None)]
+            if hasattr(connection, 'get_transport'):
+                transport = connection.get_transport() if hasattr(connection, 'get_transport') else None
+                if transport: sockets.append(transport.sock)
+            for channel in sockets:
+                if channel is None: continue
+                try: channel.shutdown(socket.SHUT_RDWR)
+                except (OSError, AttributeError, EOFError): pass
+                try: channel.close()
+                except (OSError, AttributeError, EOFError): pass
+
     def close(self):
         for obj in (self.conn,self.transport):
             if obj:

@@ -39,6 +39,7 @@ from file_tools import (load_bookmarks, save_bookmarks, server_scope, paired_pat
                         RemoteEdit, validate_remote_name, create_remote_file)
 from local_files import read_directory, navigation_path
 from app_assets import icon_path, set_windows_identity
+from transfer_control import OperationCancelled, check_cancelled
 
 STYLE = '''
 QWidget { background: #0b101b; color: #e4eaf5; font-family: Segoe UI; font-size: 10pt; }
@@ -155,6 +156,8 @@ class Session(QWidget):
         self.owns_pool = pool is None
         self.transfer_pool = pool or TransferPool(Client, lambda client, ensure, job: job[0].run_transfer_job(client, ensure, job[1:]))
         self.pending = 0
+        self.stop_event = threading.Event()
+        self.active_batches = []
         self.upload_batches = deque()
         self.progress_bars = {}
         self.connected = False
@@ -268,6 +271,22 @@ class Session(QWidget):
     def submit(self, action, success=None, row=None, operation='Operation'):
         self.pending += 1
         self.jobs.put((action, success, row, operation))
+    def raise_if_stopped(self):
+        check_cancelled(self.stop_event)
+
+    def stop_operations(self):
+        self.stop_event.set(); self.connected = False
+        self.queue_timer.stop()
+        for batch in self.active_batches:
+            if not batch['finished']:
+                batch['finished'] = True; self.pending -= 1
+                batch['barrier'].set()
+                batch['actions'] = iter(())
+        self.active_batches.clear(); self.upload_batches.clear()
+        self.transfer_pool.cancel(self.stop_event)
+        self.client.cancel()
+        self.status.setText(f'Stopping operations… {self.pending} remaining')
+
     def run_jobs(self):
         while True:
             job = self.jobs.get()
@@ -279,12 +298,17 @@ class Session(QWidget):
             self.run_job(*job)
     def run_job(self, action, success, row, operation, on_finished=None):
         try:
+            self.raise_if_stopped()
             if operation != 'Operation': self.events.put(('operation_status', operation, 'Started'))
             if row is not None: self.events.put(('state', row, 'Running'))
             result = action()
             self.events.put(('success', success, result, row))
             if operation != 'Operation': self.events.put(('operation_status', operation, 'Completed'))
         except Exception as exc:
+            if isinstance(exc, OperationCancelled) or self.stop_event.is_set():
+                if row is not None: self.events.put(('state', row, 'Cancelled'))
+                self.events.put(('operation_status', operation, 'Cancelled'))
+                return
             message = redact_message(str(exc), self.connection_secrets)
             stage = self.client.connection_stage if operation == 'Connect' else operation
             self.events.put(('error', type(exc).__name__, row, stage, message))
@@ -294,7 +318,9 @@ class Session(QWidget):
         label = operation + (f' #{row + 1}' if row is not None else '')
         client.on_status = lambda message: self.events.put(('connection_step', f'{label}: {message}', datetime.now(timezone.utc).isoformat()))
         def execute():
-            try: return action(client, ensure)
+            try:
+                self.transfer_pool.checkpoint(self.stop_event)
+                return action(client, ensure)
             except Exception:
                 client.close(); raise
         self.run_job(execute, success, row, operation, on_finished)
@@ -308,6 +334,8 @@ class Session(QWidget):
             if event[0] == 'done':
                 self.pending -= 1
                 if len(event) > 1 and event[1]: event[1]()
+                if self.stop_event.is_set():
+                    self.status.setText(f'Stopping operations… {self.pending} remaining' if self.pending else 'Stopped; reconnect to start new work')
             elif event[0] == 'connection_step':
                 self.log.appendPlainText(event[2] + '  ' + event[1])
                 self.logger.info(json.dumps({'event': 'connection_step', 'timestamp': event[2], 'stage': event[1]}))
@@ -315,12 +343,15 @@ class Session(QWidget):
                 stamp = datetime.now(timezone.utc).isoformat()
                 self.log.appendPlainText(stamp + '  ' + event[1] + ': ' + event[2])
                 self.logger.info(json.dumps({'event': 'operation_status', 'timestamp': stamp, 'operation': event[1], 'status': event[2]}))
-            elif event[0] == 'state': self.set_transfer_state(event[1], event[2])
+            elif event[0] == 'state':
+                state = 'Paused' if event[2] == 'Running' and self.transfer_pool.paused else event[2]
+                self.set_transfer_state(event[1], state)
             elif event[0] == 'progress':
                 bar = self.progress_bars[event[1]]
                 percent, rate = event[2], event[3]
                 bar.setValue(percent or 0)
                 bar.setFormat(f'{percent if percent is not None else "—"}%  •  {rate:.2f} MB/s')
+                if self.transfer_pool.paused: bar.setFormat(f'{percent or 0}%  •  Paused')
             elif event[0] == 'transfer_event':
                 data = event[1]
                 self.logger.info(json.dumps(data))
@@ -334,7 +365,7 @@ class Session(QWidget):
                 self.log.appendPlainText(details)
             elif event[0] == 'success':
                 if event[3] is not None: self.set_transfer_state(event[3], 'Completed')
-                if event[1]: event[1](event[2])
+                if event[1] and not self.stop_event.is_set(): event[1](event[2])
             elif event[0] == 'error':
                 self.status.setText('ERROR: ' + event[3] + ' — ' + event[1] + ' (see Event log)')
                 stamp = datetime.now(timezone.utc).isoformat()
@@ -344,6 +375,7 @@ class Session(QWidget):
                 self.activity_toggle.setChecked(True); self.activity.setCurrentIndex(1)
                 if event[2] is not None: self.set_transfer_state(event[2], 'Failed')
     def set_transfer_state(self, row, state):
+        self.transfers.topLevelItem(row).setData(1, Qt.ItemDataRole.UserRole, state)
         bar = self.progress_bars.get(row)
         if bar is None:
             self.transfers.topLevelItem(row).setText(1, state)
@@ -351,11 +383,11 @@ class Session(QWidget):
         if state == 'Completed':
             bar.setValue(100)
             bar.setFormat('100%  •  ' + bar.property('average_text') + '  •  Completed')
-        elif state == 'Failed':
-            bar.setFormat(f'{bar.value()}%  •  Failed — requeue to retry')
+        elif state in ('Failed', 'Cancelled'):
+            bar.setFormat(f'{bar.value()}%  •  {state} — requeue to retry')
         else:
             if state == 'Running': self.transfers.scrollToItem(self.transfers.topLevelItem(row))
-            bar.setFormat('0%  •  0.00 MB/s  •  ' + state)
+            bar.setFormat(f'{bar.value()}%  •  0.00 MB/s  •  ' + state)
     def load_connection_url(self):
         if '://' not in self.host.text(): return True
         if self.pending or self.connected:
@@ -374,7 +406,7 @@ class Session(QWidget):
         return True
 
     def connect_server(self):
-        if self.edits:
+        if self.edits and not self.connection_args:
             self.status.setText('Stop remote editing sessions before reconnecting'); return
         if not self.load_connection_url(): return
         if self.pending:
@@ -385,6 +417,9 @@ class Session(QWidget):
         except ValueError:
             self.status.setText('Enter a host and port between 1 and 65535'); return
         args = (self.host.text().strip(), port, self.user.text(), self.password.text(), self.protocol.currentText())
+        if self.edits and server_scope(args) != server_scope(self.connection_args):
+            self.status.setText('Stop remote editing sessions before connecting to another server'); return
+        self.stop_event.clear()
         self.connection_secrets = tuple(value for value in args[:1] + args[2:4] if value)
         self.connection_args = args
         self.sync_roots = None
@@ -498,8 +533,10 @@ class Session(QWidget):
         last_emit = [0.0]
         previous_bytes = [None]
         def progress(done, total):
+            self.transfer_pool.checkpoint(self.stop_event)
             if previous_bytes[0] is not None:
-                self.transfer_pool.bandwidth[direction].consume(max(0, done - previous_bytes[0]))
+                self.transfer_pool.bandwidth[direction].consume(max(0, done - previous_bytes[0]),
+                                                              lambda: self.transfer_pool.checkpoint(self.stop_event))
             previous_bytes[0] = done
             percent, rate = stats.update(done, total)
             now = stats.clock()
@@ -517,7 +554,8 @@ class Session(QWidget):
                     method = client.upload if direction == 'Upload' else client.download
                     method(str(source), str(dest), progress, resume=resume)
             except Exception as exc:
-                record('transfer_failed', error_type=type(exc).__name__, **stats.summary())
+                cancelled = isinstance(exc, OperationCancelled) or self.stop_event.is_set()
+                record('transfer_cancelled' if cancelled else 'transfer_failed', error_type=type(exc).__name__, **stats.summary())
                 raise
             summary = stats.summary()
             record('transfer_completed', **summary)
@@ -532,7 +570,7 @@ class Session(QWidget):
         resource = posixpath.normpath(str(dest)) if direction == 'Upload' else os.path.normcase(os.path.abspath(str(dest)))
         scope = self.connection_args[:3] + self.connection_args[4:] if direction == 'Upload' else ()
         self.transfer_pool.submit(direction, (direction, scope, resource), self.connection_args,
-            (self, transfer, completed, row, direction, on_finished), barrier=barrier)
+            (self, transfer, completed, row, direction, on_finished), barrier=barrier, cancelled=self.stop_event)
     def clear_finished_queue(self):
         # Pending includes undispatched folder work and completion callbacks.
         # Never recycle row indices while worker events can still reference them.
@@ -676,7 +714,8 @@ class Session(QWidget):
             self.status.setText('Connect and wait for current operations before uploading edits'); return
         previous = [0]
         def verify(done, total):
-            self.transfer_pool.bandwidth['Download'].consume(max(0, done - previous[0]))
+            self.transfer_pool.bandwidth['Download'].consume(max(0, done - previous[0]),
+                                                            lambda: self.transfer_pool.checkpoint(self.stop_event))
             previous[0] = done
         def transfer(client, progress):
             edit.upload_changes(client, progress, verify)
@@ -748,13 +787,14 @@ class Session(QWidget):
             self.status.setText(f'Queued {len(directories)} folders and {len(files)} files; skipped {skipped} links/excluded items')
             self.log.appendPlainText(f'Upload destination: {target}\nPlanning complete: {len(directories)} folders, {len(files)} files, {skipped} links/excluded items skipped.')
             actions = chain(((None, directory) for directory in directories), iter(files))
-            self.upload_batches.append({'actions': iter(actions), 'resume': resume,
+            batch = {'actions': iter(actions), 'resume': resume,
                 'remaining': len(files), 'barrier': threading.Event(), 'directories_ready': False,
-                'dispatched': False, 'finished': False})
+                'dispatched': False, 'finished': False}
+            self.upload_batches.append(batch); self.active_batches.append(batch)
             # Keep the tab alive until its remaining plan has been dispatched.
             self.pending += 1
             self.queue_timer.start()
-        self.submit(lambda: plan_uploads(paths, target, file_filter), ready, operation='Upload planning')
+        self.submit(lambda: plan_uploads(paths, target, file_filter, self.raise_if_stopped), ready, operation='Upload planning')
     def dispatch_upload_batch(self):
         if not self.upload_batches:
             self.queue_timer.stop(); return
@@ -786,6 +826,7 @@ class Session(QWidget):
     def finish_upload_batch(self, batch):
         if batch['dispatched'] and batch['directories_ready'] and batch['remaining'] == 0 and not batch['finished']:
             batch['finished'] = True; self.pending -= 1
+            if batch in self.active_batches: self.active_batches.remove(batch)
             self.refresh_remote()
     def upload_selected(self):
         self.upload_paths([Path(i.data(0, Qt.ItemDataRole.UserRole)[0]) for i in self.local_tree.selectedItems() if i.text(0) != '..'])
@@ -939,6 +980,11 @@ class App(QMainWindow):
         menu.aboutToShow.connect(lambda: sync.setChecked(bool(self.tabs.currentWidget() and self.tabs.currentWidget().sync_roots)))
         menu.addAction('Edit selected remote file', lambda: self.tabs.currentWidget().edit_remote_file() if self.tabs.currentWidget() else None)
         menu.addAction('Remote editing sessions', lambda: self.tabs.currentWidget().manage_edits() if self.tabs.currentWidget() else None)
+        menu.addSeparator()
+        self.pause_action = menu.addAction('Pause transfers'); self.pause_action.setCheckable(True)
+        self.pause_action.triggered.connect(self.pause_transfers)
+        menu.addAction('Stop transfers', self.stop_transfers)
+        menu.addSeparator()
         menu.addAction('Exit', self.close)
         self.menu_button.setMenu(menu); header.addWidget(self.menu_button)
         layout.addLayout(header)
@@ -950,6 +996,22 @@ class App(QMainWindow):
         self.tabs.setCurrentIndex(self.tabs.addTab(Session(self.logger, self.transfer_pool), 'Connection ' + str(self.tabs.count() + 1)))
     def open_settings(self):
         SettingsDialog(self).exec()
+    def pause_transfers(self, paused):
+        self.transfer_pool.set_paused(paused)
+        self.pause_action.setText('Resume transfers' if paused else 'Pause transfers')
+        for index in range(self.tabs.count()):
+            session = self.tabs.widget(index)
+            for row in range(session.transfers.topLevelItemCount()):
+                state = session.transfers.topLevelItem(row).data(1, Qt.ItemDataRole.UserRole)
+                if state in ('Running', 'Paused'): session.set_transfer_state(row, 'Paused' if paused else 'Running')
+            session.log.appendPlainText('Transfers paused' if paused else 'Transfers resumed')
+    def stop_transfers(self):
+        self.pause_action.setChecked(False); self.pause_transfers(False)
+        for index in range(self.tabs.count()): self.tabs.widget(index).stop_operations()
+    def close_when_idle(self):
+        if any(self.tabs.widget(i).pending for i in range(self.tabs.count())):
+            QTimer.singleShot(100, self.close_when_idle)
+        else: self.close()
     def close_tab(self, index):
         session = self.tabs.widget(index)
         if session.pending:
@@ -959,8 +1021,12 @@ class App(QMainWindow):
         session.timer.stop(); session.queue_timer.stop(); session.edit_timer.stop(); session.jobs.put(None); session.worker.join(timeout=1)
         self.tabs.removeTab(index); session.deleteLater()
     def closeEvent(self, event):
-        if any(self.tabs.widget(i).pending or self.tabs.widget(i).edits for i in range(self.tabs.count())):
-            QMessageBox.warning(self, 'Operations or editing active', 'Wait for queued operations and stop remote editing sessions before exiting.'); event.ignore(); return
+        if any(self.tabs.widget(i).edits for i in range(self.tabs.count())):
+            QMessageBox.warning(self, 'Editing active', 'Stop remote editing sessions before exiting to preserve your local changes.'); event.ignore(); return
+        if any(self.tabs.widget(i).pending for i in range(self.tabs.count())):
+            if QMessageBox.question(self, 'Operations active', 'Stop queued/running operations and exit when they have stopped?') == QMessageBox.StandardButton.Yes:
+                self.stop_transfers(); QTimer.singleShot(100, self.close_when_idle)
+            event.ignore(); return
         while self.tabs.count(): self.close_tab(0)
         self.transfer_pool.shutdown()
         event.accept()

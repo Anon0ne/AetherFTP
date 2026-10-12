@@ -6,11 +6,11 @@ This is a proposal, not a list of implemented features. FileZilla's documented c
 
 ## Delivered in 0.1.1b
 
-Filename filters, paired bookmarks, synchronized browsing, Notepad remote editing with confirmed uploads and conflict checks, remote right-click file/folder creation, Windows compatibility-folder fixes, a distinct application icon, and Desktop shortcut support.
+Filename filters, paired bookmarks, synchronized browsing, Notepad remote editing with confirmed uploads and conflict checks, remote right-click file/folder creation, Windows compatibility-folder fixes, a distinct application icon, and Desktop shortcut support, global Pause/Resume and Stop controls, and Stop and exit.
 
 ## Reliable queue control
 
-1. Pause, cancel and retry individual transfers or whole batches, with explicit partial-file handling.
+1. Add individual transfer/batch pause, cancellation and retry controls beyond the delivered global controls.
 2. Save pending queues between launches, without saving credentials in the queue; require reconnection before recovery.
 3. Recursive folder downloads with the same responsive batching as uploads.
 4. Per-server connection budgets covering browsing, uploads and downloads together; show current usage and explain server 421 limits.
