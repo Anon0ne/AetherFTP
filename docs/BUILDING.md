@@ -54,8 +54,10 @@ An Actions artifact is a development build. It is not automatically a public rel
 6. Write release notes covering changes, installation, validation, known limits and rollback. Publish with GitHub CLI using the exact verified commit:
 
 ```powershell
-gh release create <tag> <windows-zip> <checksums-file> --repo Anon0ne/AetherFTP --target <verified-commit-sha> --title '<release-title>' --notes-file <release-notes-file> --prerelease
+gh release create <tag> <windows-zip> <checksums-file> --repo Anon0ne/AetherFTP --target <verified-commit-sha> --title '<release-title>' --notes-file <release-notes-file>
 ```
+
+For beta releases, add `--prerelease`. For stable releases such as 0.1.3 Official, omit it and use `--latest` to designate the latest release.
 
 7. Verify the uploaded asset names/digests and release link. Retain prior GitHub releases for rollback. Remove obsolete local builds only after their processes have exited and shortcuts point to the new version.
 

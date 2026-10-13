@@ -31,3 +31,7 @@ Source history uses Justin Funderburk's supplied author identity. Product builde
 ## 0.1.2b verification
 
 117 tests cover remote traversal, recursive downloads, Windows destination safety, conflict preflight, deletion ordering, actual Qt drop events, destination dialogs and search cancellation/rendering, alongside prior regressions. Adapter tests use disposable trees; broad live-server validation remains ongoing. Windows CI must pass for the exact release commit before publication.
+
+## 0.1.3 Official
+
+Promotes the user-validated 0.1.2b feature set without functional changes. The release version and stable installation documentation are updated. Run the 117-test regression suite and verify Windows source/build/packaged startup for the exact 0.1.3 commit before publishing.

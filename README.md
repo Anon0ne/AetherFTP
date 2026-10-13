@@ -1,11 +1,11 @@
 # AetherFTP
 
 ![Windows validation](https://github.com/Anon0ne/AetherFTP/actions/workflows/windows.yml/badge.svg)
-[![Latest release](https://img.shields.io/github/v/release/Anon0ne/AetherFTP?include_prereleases)](https://github.com/Anon0ne/AetherFTP/releases)
+[![Latest release](https://img.shields.io/github/v/release/Anon0ne/AetherFTP)](https://github.com/Anon0ne/AetherFTP/releases)
 
 A Windows FTP/FTPES/FTPS/SFTP client with a spacious dark purple/cyan interface inspired by Marauder V8 styling. Built with Python and PySide6/Qt. **Project builder: Anon0ne.**
 
-Current release: **0.1.2b**, a public beta. [Download the Windows ZIP](https://github.com/Anon0ne/AetherFTP/releases/download/v0.1.2b/AetherFTP-Windows-v0.1.2b.zip) · [Release notes](https://github.com/Anon0ne/AetherFTP/releases/tag/v0.1.2b) · [Changelog](CHANGELOG.md)
+Current release: **0.1.3 Official**, the first stable release. [Download the Windows ZIP](https://github.com/Anon0ne/AetherFTP/releases/download/v0.1.3/AetherFTP-Windows-v0.1.3.zip) · [Release notes](https://github.com/Anon0ne/AetherFTP/releases/tag/v0.1.3) · [Changelog](CHANGELOG.md)
 
 ![AetherFTP 0.1.2b interface](docs/images/aetherftp-0.1.2b.png)
 
@@ -23,7 +23,7 @@ Current release: **0.1.2b**, a public beta. [Download the Windows ZIP](https://g
 
 ## Features
 
-| Area | Available in 0.1.2b |
+| Area | Available in 0.1.3 |
 | --- | --- |
 | Connections | FTP, explicit TLS via FTPES/FTPS, SFTP, connection URLs, multiple tabs |
 | Server Book | Profiles with no saved password, Windows Credential Manager, or Windows-user DPAPI encryption |
@@ -39,7 +39,7 @@ Current release: **0.1.2b**, a public beta. [Download the Windows ZIP](https://g
 
 ## Current limits
 
-This beta supports explicit TLS, not implicit FTPS. Saved queues, individual transfer retry controls, directory comparison and configurable external editors are planned. Recursive FTP searches, downloads and deletion require MLSD support. Remote-to-remote drops are same-tab moves; remote virtual-file drops into Windows Explorer are not implemented. Resume checks sizes, not file identity; use it only for matching partial files. SFTP requires a verified host key in your Windows user's `known_hosts`. Real-server interoperability testing remains ongoing.
+This release supports explicit TLS, not implicit FTPS. Saved queues, individual transfer retry controls, directory comparison and configurable external editors are planned. Recursive FTP searches, downloads and deletion require MLSD support. Remote-to-remote drops are same-tab moves; remote virtual-file drops into Windows Explorer are not implemented. Resume checks sizes, not file identity; use it only for matching partial files. SFTP requires a verified host key in your Windows user's `known_hosts`. Real-server interoperability testing remains ongoing.
 
 [Roadmap](ROADMAP.md) · [Detailed behavior and safeguards](docs/USAGE.md)
 

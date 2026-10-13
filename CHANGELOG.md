@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 Official - 2026-10-13
+
+- Promote the user-validated 0.1.2b feature set to the first stable release.
+- Set application version to 0.1.3 and publish a stable Windows package with checksums, documentation and shortcut helpers.
+- Retain bidirectional drag-and-drop, recursive transfers, Remote Search, Rename/Move/Delete, secure profiles and queue controls.
+- Update installation and build documentation for stable release publication. Existing protocol and interoperability limitations remain documented.
+
 ## 0.1.2b - 2026-10-12
 
 - Add remote-to-local file/folder drag-and-drop downloads, preserving nested and empty folders through the responsive queue.
